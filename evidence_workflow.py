@@ -7,7 +7,7 @@ from collections import defaultdict
 from activity import step
 from papers import _find_target
 from preflight import _same_article
-from table_store import FeishuTable, LocalTable, TableError, _check_fields, _identity
+from table_store import FeishuTable, LocalTable, TableError, TargetChanged, _check_fields, _identity
 
 
 _FIELD_NAMES = {
@@ -70,7 +70,7 @@ def _locate(table, schema, link, title, url, paper_title, rows):
         raise ValueError("同一论文链接对应多条记录，请先核对重复行。")
     if isinstance(table, FeishuTable):
         types = {f["name"]: f["type"] for f in schema}
-        row = table._locate(key, types, {link: url})
+        row = table._locate(key, types, {link: url}, check_duplicates=True)
     elif isinstance(table, LocalTable):
         found = table._db.execute("SELECT id FROM demo_papers WHERE paper_key=?", (key,)).fetchone()
         row = table.get(found["id"]) if found else None
@@ -221,7 +221,8 @@ def commit(table, plan):
                 if draft["patch"]:
                     with step(f"提交第 {number} 篇论文的已确认字段", tool=tool):
                         write = table.upsert(draft["key"], draft["patch"], draft["request_id"],
-                                             update_only=record_id is not None)
+                                             update_only=record_id is not None, expected_record_id=record_id,
+                                             expected_fields=draft["before"])
                         record_id = write["record_id"]
                 result["record_id"] = record_id
                 with step(f"回读第 {number} 篇论文的字段值", tool=tool):
@@ -230,6 +231,8 @@ def commit(table, plan):
                             any(saved["fields"].get(n) != v for n, v in draft["values"].items())):
                         raise ValueError("回读记录或字段值与确认内容不符。")
                 result.update(status="verified", message=f"已核对 {len(draft['values'])} 个字段，回读一致。")
+            except TargetChanged as error:
+                result.update(status="failed", message=str(error))
             except (ValueError, TableError, OSError) as error:
                 result.update(status="unverified", message=f"未取得一致的写入回执，请核对表内记录。{error}")
         verified = sum(item["status"] == "verified" for item in results)

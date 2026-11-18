@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
-from table_store import FeishuTable, LarkCliTable, LocalTable, TableError, RecordNotFound
+from table_store import FeishuTable, LarkCliTable, LocalTable, TableError, TargetChanged, RecordNotFound
 from tools.feishu_setup import browser_url, resolve_target, save_target
 
 
@@ -76,6 +76,22 @@ class FakeFeishu:
 
 
 class LocalTableTests(unittest.TestCase):
+    def test_guarded_create_update_and_replay(self):
+        table = LocalTable(":memory:")
+        self.addCleanup(table.close)
+        args = (KEY, {"论文链接": LINK}, "confirmed-create")
+        created = table.upsert(*args, expected_record_id=None)
+        self.assertEqual(table.upsert(*args, expected_record_id=None), created)
+        with self.assertRaises(TargetChanged):
+            table.upsert(KEY, {"研究笔记": "旧计划"}, "late", expected_record_id=None)
+        with self.assertRaises(TargetChanged):
+            table.upsert(KEY, {"研究笔记": "旧计划"}, "other", expected_record_id="other-id")
+        table.upsert(KEY, {"研究笔记": "已更新"}, "external")
+        with self.assertRaises(TargetChanged):
+            table.upsert(KEY, {"研究笔记": "旧计划"}, "stale", expected_record_id=created["record_id"],
+                         expected_fields={"研究笔记": ""})
+        self.assertEqual(table.get(created["record_id"])["fields"]["研究笔记"], "已更新")
+
     def test_upsert_retry_updates_only_requested_fields(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder)/"demo.sqlite"
@@ -118,6 +134,75 @@ class FeishuTableTests(unittest.TestCase):
         self.table = FeishuTable(":memory:", "app", "dummy", "base", "tbl")
         self.addCleanup(self.table._db.close)
         self.remote = FakeFeishu()
+
+    def test_guarded_alias_edit_writes_only_approved_id_and_rejects_cached_duplicates(self):
+        self.remote.columns = [{"field_id": "alias", "field_name": "文献链接", "type": 1},
+                               {"field_id": "ref", "field_name": "引用", "type": 15},
+                               {"field_id": "note", "field_name": "阅读笔记", "type": 1}]
+        self.remote.records = {"approved": {"文献链接": LINK}, "citation": {"引用": LINK, "阅读笔记": "保留"}}
+        with patch.object(self.table, "_request", side_effect=self.remote) as http:
+            saved = self.table.upsert(KEY, {"阅读笔记": "实测"}, "approved-edit", update_only=True,
+                                      expected_record_id="approved", expected_fields={"文献链接": LINK, "阅读笔记": ""})
+            self.assertEqual(saved["record_id"], "approved")
+            self.assertEqual([c.args[1].rsplit("/", 1)[-1] for c in http.call_args_list if c.args[0] == "PUT"],
+                             ["approved"])
+            self.assertEqual(self.remote.records["citation"]["阅读笔记"], "保留")
+            # 缓存里已有 approved。之后出现同链接记录时仍须检查实际行并停止写入。
+            http.reset_mock()
+            self.remote.records["duplicate"] = {"文献链接": LINK}
+            with self.assertRaises(TargetChanged):
+                self.table.upsert(KEY, {"阅读笔记": "后续更新"}, "duplicate", update_only=True,
+                                  expected_record_id="approved", expected_fields={"文献链接": LINK, "阅读笔记": "实测"})
+            self.assertFalse(any(c.args[0] != "GET" for c in http.call_args_list))
+
+    def test_guarded_new_record_cannot_take_over_row_created_since_confirmation(self):
+        self.remote.records["inserted"] = {"论文链接": LINK, "方法概述": "他人刚填写"}
+        with patch.object(self.table, "_request", side_effect=self.remote) as http:
+            with self.assertRaises(TargetChanged):
+                self.table.upsert(KEY, {"论文链接": LINK, "方法概述": "旧预览"}, "new", expected_record_id=None)
+            self.assertTrue(all(c.args[0] == "GET" for c in http.call_args_list))
+            self.assertEqual(self.remote.records["inserted"]["方法概述"], "他人刚填写")
+
+    def test_evidence_commit_limits_writes_to_confirmed_row_with_text_link_alias(self):
+        from evidence_workflow import commit, prepare
+        self.remote.columns = [{"field_id": "alias", "field_name": "文献链接", "type": 1},
+                               {"field_id": "ref", "field_name": "引用", "type": 15},
+                               {"field_id": "note", "field_name": "阅读笔记", "type": 1}]
+        self.remote.records = {"intended": {"文献链接": LINK}, "cites-paper": {"引用": LINK}}
+        item = {"kind": "metric", "label": "指标", "value": "30", "quote": "result: 30",
+                "source": "Table 1", "source_url": LINK}
+        paper = {"url": LINK, "title": "测试论文", "items": [item]}
+        with patch.object(self.table, "_request", side_effect=self.remote) as http, \
+                patch("evidence_extract.extract_evidence", return_value=paper):
+            plan, _ = prepare(self.table, [LINK])
+            self.assertEqual(commit(self.table, plan)["evidence_results"][0]["record_id"], "intended")
+            self.assertNotIn("阅读笔记", self.remote.records["cites-paper"])
+            item["value"] = "31"
+            item["quote"] = "result: 31"
+            plan, _ = prepare(self.table, [LINK])
+            original_upsert = self.table.upsert
+            def introduce_conflict(*args, **kwargs):
+                self.remote.records["duplicate"] = {"文献链接": LINK}
+                return original_upsert(*args, **kwargs)
+            http.reset_mock()
+            with patch.object(self.table, "upsert", side_effect=introduce_conflict):
+                receipt = commit(self.table, plan)
+            self.assertEqual(receipt["evidence_results"][0]["status"], "failed")
+            self.assertTrue(all(c.args[0] == "GET" for c in http.call_args_list))
+            self.assertNotIn("31", self.remote.records["intended"]["阅读笔记"])
+
+    def test_guarded_create_lost_response_reuses_own_persisted_token(self):
+        args = (KEY, {"论文链接": LINK}, "guarded-retry")
+        self.remote.drop_create_response = True
+        with patch.object(self.table, "_request", side_effect=self.remote):
+            with self.assertRaises(TableError):
+                self.table.upsert(*args, expected_record_id=None)
+            with self.assertRaises(TargetChanged):
+                self.table.upsert(KEY, {"论文链接": LINK}, "other-attempt", expected_record_id=None)
+            saved = self.table.upsert(*args, expected_record_id=None)
+            self.assertEqual(saved, self.table.upsert(*args, expected_record_id=None))
+            self.assertEqual(len(set(self.remote.posts)), 1)
+            self.assertEqual(len(self.remote.records), 1)
 
     def test_remote_existing_record_pagination_and_partial_update(self):
         self.remote.records["recA"] = {

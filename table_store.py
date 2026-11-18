@@ -27,6 +27,23 @@ class RecordNotFound(TableError):
     """未找到指定记录或论文。"""
 
 
+class TargetChanged(TableError):
+    """已确认的目标行或原值发生变化，写入已中止。"""
+
+
+_ANY_RECORD = object()
+
+
+def _check_target_id(expected, actual):
+    if expected is not _ANY_RECORD and actual != expected:
+        raise TargetChanged("目标行与确认时不一致，请重新预览。")
+
+
+def _check_original(cells, expected_fields):
+    if expected_fields and any(cells.get(n, "") != old for n, old in expected_fields.items()):
+        raise TargetChanged("目标单元格与确认时不一致，请重新预览。")
+
+
 class _TransientError(TableError):
     def __init__(self, message, retry_after=None):
         super().__init__(message)
@@ -259,7 +276,8 @@ class LocalTable:
                 raise RecordNotFound("没有找到这条记录。")
             return {"id": record_id, "fields": json.loads(row["cells"])}
 
-    def upsert(self, key, values, request_id, *, update_only=False):
+    def upsert(self, key, values, request_id, *, update_only=False,
+               expected_record_id=_ANY_RECORD, expected_fields=None):
         key = _identity(key)
         fingerprint = _fingerprint("update-only:" + key if update_only else key, values, request_id)
         with self._lock, self._db:
@@ -269,12 +287,15 @@ class LocalTable:
             if prior:
                 if prior["fingerprint"] != fingerprint:
                     raise TableError("这个请求编号已关联到其他内容。请重新提交。")
+                _check_target_id(expected_record_id, None if prior["action"] == "created" else prior["record_id"])
                 return {"record_id": prior["record_id"], "action": prior["action"]}
             row = self._db.execute("SELECT * FROM demo_papers WHERE paper_key=?", (key,)).fetchone()
+            _check_target_id(expected_record_id, row["id"] if row else None)
             if update_only and row is None:
                 raise RecordNotFound("未找到这篇论文的已有记录。")
             record_id = row["id"] if row else "rec_" + uuid.uuid4().hex[:16]
             before = json.loads(row["cells"]) if row else {}
+            _check_original(before, expected_fields)
             cells = {**before, **values}
             action = ("unchanged" if before == cells else "updated") if row else "created"
             if action == "updated":
@@ -472,12 +493,15 @@ class FeishuTable:
         path = self._base + "/records/" + quote(record_id, safe="")
         return _record(self._request("GET", path)["data"]["record"])
 
-    def _locate(self, key, types, values):
+    def _locate(self, key, types, values, *, check_duplicates=False):
         known = self._db.execute("SELECT record_id FROM fs_keys WHERE scope=? AND paper_key=?",
                                  (self._scope, key)).fetchone()
+        cached = None
         if known:
             try:
-                return self.get(known["record_id"])
+                cached = self.get(known["record_id"])
+                if not check_duplicates:
+                    return cached
             except RecordNotFound:
                 self._db.execute("DELETE FROM fs_keys WHERE scope=? AND paper_key=?", (self._scope, key))
         candidates = {n for n in types if n in _PAPER_LINKS or n in _IDENTIFIERS}
@@ -490,9 +514,11 @@ class FeishuTable:
             # 允许用「出处」等自定义超链接列；已有其他正式论文标识的行可能只是在引用本文。
             matches = [row for row in rows if not any(row["fields"].get(n) for n in candidates)
                        and any(_identity(row["fields"].get(n, "")) == key for n in other_links)]
-        if len(matches) > 1:
+        if len(matches) > 1 or (cached and matches and cached["id"] != matches[0]["id"]):
+            if check_duplicates:
+                raise TargetChanged("多个记录标识指向这篇论文，请核对重复记录后重新预览。")
             raise TableError("飞书表中有多条记录指向这篇论文，请先核对重复记录。")
-        return matches[0] if matches else None
+        return matches[0] if matches else cached
 
     def _verify(self, record_id, values):
         for delay in (0, 0.35, 1):
@@ -503,7 +529,8 @@ class FeishuTable:
                 return
         raise TableError(f"飞书已接收操作，但回读内容尚未匹配。请核对记录 {record_id} 并重试原请求。")
 
-    def _plan_write(self, key, values, types, request_id, fingerprint, update_only):
+    def _plan_write(self, key, values, types, request_id, fingerprint, update_only,
+                    expected_record_id, expected_fields):
         params = (self._scope, request_id)
         with self._db:
             self._db.execute("BEGIN IMMEDIATE")
@@ -511,18 +538,29 @@ class FeishuTable:
             if op:
                 if op["fingerprint"] != fingerprint:
                     raise TableError("这个请求编号已关联到其他内容。请重新提交。")
+                _check_target_id(expected_record_id, None if op["action"] == "created" else op["record_id"])
                 return op, None
             target = (self._scope, key)
             if not update_only:
                 pending = self._db.execute("SELECT * FROM fs_pending_creates WHERE scope=? AND paper_key=?", target).fetchone()
                 if pending:
+                    if expected_record_id is not _ANY_RECORD:
+                        raise TargetChanged("同一篇论文已有未核验的新增请求，请先核对原回执。")
                     return None, pending
                 # 兼容先前版本已保存请求编号、尚未保存论文级恢复标记的同内容重试。
                 older = self._db.execute("""SELECT id FROM fs_requests WHERE scope=? AND fingerprint=?
                     AND action='created' AND done=0 LIMIT 1""", (self._scope, fingerprint)).fetchone()
                 if older:
+                    if expected_record_id is not _ANY_RECORD:
+                        raise TargetChanged("同一篇论文已有未核验的新增请求，请先核对原回执。")
                     return None, {"request_id": older["id"], "cells": json.dumps(values)}
-            existing = self._locate(key, types, {} if update_only else values)
+            if expected_record_id is _ANY_RECORD:
+                existing = self._locate(key, types, {} if update_only else values)
+            else:
+                # 用确认时的链接列参与查找，即使本次仅提交笔记且链接列是自定义文本列。
+                existing = self._locate(key, types, {**(expected_fields or {}), **values}, check_duplicates=True)
+                _check_target_id(expected_record_id, existing["id"] if existing else None)
+                _check_original(existing["fields"] if existing else {}, expected_fields)
             if update_only and not existing:
                 raise RecordNotFound("未找到这篇论文的已有记录。")
             record_id = existing["id"] if existing else None
@@ -536,17 +574,19 @@ class FeishuTable:
                              (*params, fingerprint, str(uuid.uuid4()), action, record_id))
             return self._db.execute("SELECT * FROM fs_requests WHERE scope=? AND id=?", params).fetchone(), None
 
-    def upsert(self, key, values, request_id, *, update_only=False):
+    def upsert(self, key, values, request_id, *, update_only=False,
+               expected_record_id=_ANY_RECORD, expected_fields=None):
         key = _identity(key)
         fingerprint = _fingerprint("update-only:" + key if update_only else key, values, request_id)
         with self._lock:
             types = _check_fields(self.schema(), values)
             params = (self._scope, request_id)
-            op, pending = self._plan_write(key, values, types, request_id, fingerprint, update_only)
+            options = (update_only, expected_record_id, expected_fields)
+            op, pending = self._plan_write(key, values, types, request_id, fingerprint, *options)
             while pending:
                 # 即使新指令换了请求编号，也先恢复相同论文的未决新增及其原始字段。
                 self.upsert(key, json.loads(pending["cells"]), pending["request_id"])
-                op, pending = self._plan_write(key, values, types, request_id, fingerprint, update_only)
+                op, pending = self._plan_write(key, values, types, request_id, fingerprint, *options)
             record_id, action = op["record_id"], op["action"]
             if op["done"]:
                 return {"record_id": record_id, "action": action}
@@ -561,7 +601,15 @@ class FeishuTable:
                         self._db.execute("UPDATE fs_requests SET record_id=? WHERE scope=? AND id=?",
                                          (record_id, *params))
                 else:
-                    self._request("PUT", path + "/" + quote(record_id, safe=""), {"fields": fields})
+                    already_written = False
+                    if expected_record_id is not _ANY_RECORD:
+                        _check_target_id(expected_record_id, record_id)
+                        current = self.get(record_id)["fields"]
+                        already_written = all(current.get(k) == v for k, v in values.items())
+                        if not already_written:
+                            _check_original(current, expected_fields)
+                    if not already_written:
+                        self._request("PUT", path + "/" + quote(record_id, safe=""), {"fields": fields})
             self._verify(record_id, values)
             with self._db:
                 self._db.execute("INSERT OR REPLACE INTO fs_keys VALUES (?,?,?)", (self._scope, key, record_id))
