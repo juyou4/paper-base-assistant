@@ -10,6 +10,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from activity import step as activity_step
+
 
 FIELD_NAMES = {"abstract": "abstract_zh", "method": "method"}
 _active_steps = ContextVar("paper_model_steps", default=None)
@@ -129,11 +131,12 @@ def request_json(instructions, payload, *, step="理解操作意图"):
 
 def _chat(config, instructions, payload, step):
     url, model, key = config
-    if url is None:
-        from codex_provider import request
-        answer = request(instructions, payload, model)
-    else:
-        answer = _compatible_chat(url, model, key, instructions, payload)
+    with activity_step("调用模型 · " + step, tool="Codex CLI" if url is None else "Chat Completions"):
+        if url is None:
+            from codex_provider import request
+            answer = request(instructions, payload, model)
+        else:
+            answer = _compatible_chat(url, model, key, instructions, payload)
     steps = _active_steps.get()
     if steps is not None:
         steps.append(step)

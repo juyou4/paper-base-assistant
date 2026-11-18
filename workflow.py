@@ -7,6 +7,8 @@ from urllib.parse import urlencode
 
 import papers
 import model_support
+from activity import History
+from activity import step
 from preflight import verify_write
 from table_store import RecordNotFound, _identity
 
@@ -102,12 +104,14 @@ def _parse(message, table_name):
 class Conversation:
     def __init__(self, table, data_dir, table_name):
         self.table = table
+        self.table_tool = getattr(table, "tool_name", None)
         self.data_dir = data_dir
         self.table_name = table_name
         self.last = None
         self.last_title = ""
         self.pending = None
         self.selected_model = None
+        self.activity = History()
         self.lock = threading.RLock()
 
     def _ask(self, plan, message, choices, stage):
@@ -116,9 +120,13 @@ class Conversation:
         self.pending = task
         return {"message": message, "choices": choices, "pending_id": task["id"]}
 
+    def _read_schema(self):
+        with step("读取数据表字段", tool=self.table_tool):
+            return self.table.schema()
+
     def _commit(self, plan):
         paper = plan["paper"]
-        schema = self.table.schema()
+        schema = self._read_schema()
         for slot in plan["slots"]:
             if slot.get("skip"):
                 continue
@@ -172,15 +180,21 @@ class Conversation:
             values[field] = value
         answer = {}
         if plan["download"]:
-            path = papers.download_pdf(paper, self.data_dir)
+            with step("获取论文原文 PDF", tool="论文解析"):
+                path = papers.download_pdf(paper, self.data_dir)
             answer["download_url"] = "/api/pdf?" + urlencode({"paper": paper["url"]})
             answer["message"] = f"已下载原文 PDF（{path.stat().st_size:,} 字节）。"
         if values:
-            checks = verify_write(self.table, paper, plan, values)
+            with step("提交前核对目标字段和内容来源", tool="写前核验"):
+                checks = verify_write(self.table, paper, plan, values)
             options = {"update_only": True} if plan.get("update_only") else {}
             try:
-                write = self.table.upsert(paper["key"], values, plan["request_id"], **options)
-                row = self.table.get(write["record_id"])
+                with step("按论文标识查重并提交记录", tool=self.table_tool):
+                    write = self.table.upsert(paper["key"], values, plan["request_id"], **options)
+                with step("按记录 ID 回读并核对字段值", tool=self.table_tool):
+                    row = self.table.get(write["record_id"])
+                    if any(row["fields"].get(k) != v for k, v in values.items()):
+                        raise ValueError("写入已提交，但当前回读值不一致。请刷新表格核对。")
             except RecordNotFound:
                 if not plan.get("update_only"):
                     raise
@@ -188,8 +202,6 @@ class Conversation:
                 plan["request_id"] = uuid.uuid4().hex
                 return self._ask(plan, "在当前表可见的记录中未找到这篇论文，没有新增记录。请发另一条已有记录的论文链接或编号。",
                                  [], "paper")
-            if any(row["fields"].get(k) != v for k,v in values.items()):
-                raise ValueError("写入已提交，但当前回读值不一致。请刷新表格核对。")
             action = {"created": "已新增 1 条记录", "updated": "已更新原有记录", "unchanged": "已存在相同内容，未新增记录"}[write["action"]]
             wording = "、".join(values)
             answer.update(message=answer.get("message", "") + f"{action}。已核对「{self.table_name}」中的{wording}。",
@@ -207,8 +219,9 @@ class Conversation:
             url = external or "https://arxiv.org/abs/" + arxiv_id
             paper = {"key": _identity(url), "url": url, "title": self.last_title if url == self.last else ""}
         else:
-            paper = papers.resolve_paper(message, self.data_dir,
-                                         need_content=any(s["kind"] in {"method", "abstract"} for s in plan["slots"]))
+            need_content = any(s["kind"] in {"method", "abstract"} for s in plan["slots"])
+            with step("读取论文原文与出处" if need_content else "读取论文基本信息", tool="论文解析"):
+                paper = papers.resolve_paper(message, self.data_dir, need_content=need_content)
         plan["paper"] = paper
         return self._commit(plan)
 
@@ -224,7 +237,10 @@ class Conversation:
             return self._ask(command, f"你想把整列「{command['target']}」改名为「{command['new_value']}」，"
                              f"还是只把一篇论文在该列的值改为「{command['new_value']}」？",
                              ["修改整列的名称", "填写一条记录", "取消"], "edit_target")
-        task = prepare(self.table, command)
+        labels = {"columns": "查询数据表字段", "column": "查询字段定义", "role_list": "查询自定义角色",
+                  "role_read": "查询角色权限", "member_read": "查询协作者权限"}
+        with step(labels.get(command["op"], "读取当前设置并预览变更"), tool=self.table_tool):
+            task = prepare(self.table, command)
         if "answer" in task:
             self.pending = None
             return {"message": task["answer"]}
@@ -252,7 +268,8 @@ class Conversation:
                 if stage == "ambiguous_paper" or (stage == "ambiguous_intent" and REFERENCE.search(message)):
                     if not REFERENCE.search(message):
                         return self._ask({}, "请发你指的那篇论文链接或 arXiv 编号。", [], "ambiguous_paper")
-                    source = papers.resolve_paper(message, self.data_dir)
+                    with step("读取论文基本信息", tool="论文解析"):
+                        source = papers.resolve_paper(message, self.data_dir)
                     return self._clarify_intent(source["url"], source.get("title"))
                 if stage == "paper":
                     if self.last and re.fullmatch(r"(?:刚才|上一|之前|上面)(?:的)?(?:那|这)?(?:一)?篇(?:论文)?[。！]?", message):
@@ -284,9 +301,14 @@ class Conversation:
                 if stage == "admin_commit":
                     from admin_dialog import commit
                     self.pending = None
-                    return {"message": commit(self.table, plan), "verification": "写前已核验变更对象与原值，写后已回读"}
+                    actions = {"field": "提交并核对字段变更", "member": "提交并核对协作者权限",
+                               "role": "提交并核对角色权限"}
+                    with step(actions[plan["kind"]], tool=self.table_tool):
+                        message = commit(self.table, plan)
+                    return {"message": message, "verification": "写前已核验变更对象与原值，写后已回读"}
                 if stage == "schema":
-                    f = self.table.add_field(plan["name"], plan["kind"])
+                    with step("提交新建字段请求", tool=self.table_tool):
+                        f = self.table.add_field(plan["name"], plan["kind"])
                     self.pending = None
                     return {"message": f"已确认表结构，字段「{f['name']}」可以使用。", "verification": "已回读字段定义"}
                 if stage == "language":
@@ -306,7 +328,7 @@ class Conversation:
             if model_support.agent_info()["enabled"]:
                 from agent_router import is_candidate, route
                 if is_candidate(message):
-                    routed = route(message, self.table.schema(), self.table_name)
+                    routed = route(message, self._read_schema(), self.table_name)
                     if routed:
                         if routed["kind"] == "clarify":
                             return {"message": routed["message"]}
@@ -335,7 +357,7 @@ class Conversation:
                 if not model_support.enabled():
                     raise
                 from intent_model import interpret
-                plan = interpret(message, self.table.schema(), self.table_name)
+                plan = interpret(message, self._read_schema(), self.table_name)
             else:
                 if model_support.agent_info()["enabled"]:
                     from intent_model import review_plan

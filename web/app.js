@@ -499,7 +499,12 @@ async function api(path, options) {
     error.networkFailure = cause instanceof TypeError;
     throw error;
   }
-  if (!res.ok || data.error) throw new Error(data.error || data.message || "服务暂时不可用。");
+  if (!res.ok || data.error) {
+    const error = new Error(data.error || data.message || "服务暂时不可用。");
+    error.activity = data.activity;
+    error.agent = data.agent;
+    throw error;
+  }
   return data;
 }
 
@@ -772,18 +777,123 @@ function appendMessage(content, kind = "assistant") {
   return { article, bubble };
 }
 
-function createThinkingLoader() {
-  const article = make("article", undefined, "message assistant");
+function trackActivity(requestId) {
+  const article = make("article", undefined, "message assistant activity-message");
   const pill = make("div", undefined, "thinking-pill");
   pill.innerHTML = ICONS.spinner8;
   pill.append(make("span", "正在处理…", "thinking-step"));
-  article.append(pill);
-
+  const card = byId("activity-template").content.firstElementChild.cloneNode(true);
+  const list = card.querySelector(".activity-list");
+  const count = card.querySelector(".activity-count");
+  const rows = new Map();
+  article.append(pill, card);
   const chat = byId("chat");
   chat.append(article);
   chat.scrollTop = chat.scrollHeight;
+  let timer;
+  let stopped = false;
+  let complete = false;
+  const controller = new AbortController();
+  const statusNames = { running: "进行中", done: "已完成", failed: "失败" };
 
-  return article;
+  function render(snapshot) {
+    if (snapshot?.request_id !== requestId || !Array.isArray(snapshot.events)) return;
+    const follow = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 40;
+    const ids = new Set();
+    let failed = false;
+    for (const event of snapshot.events) {
+      if (!Number.isSafeInteger(event?.id) || ids.has(event.id) ||
+          !Object.hasOwn(statusNames, event.status)) continue;
+      ids.add(event.id);
+      failed ||= event.status === "failed";
+      let row = rows.get(event.id);
+      if (!row) {
+        row = make("li", undefined, "activity-event");
+        const marker = make("i", undefined, "activity-marker");
+        marker.setAttribute("aria-hidden", "true");
+        const elapsedEl = make("span", undefined, "activity-elapsed");
+        elapsedEl.setAttribute("role", "timer");
+        const description = make("span", undefined, "activity-description");
+        description.append(make("span", undefined, "activity-label"), make("span", undefined, "activity-tool"));
+        row.append(marker, description, make("span", undefined, "screenreader"), elapsedEl);
+        rows.set(event.id, row);
+        list.append(row);
+      }
+      // 事件只显示简短标签、状态、用时，舍弃路径、链接及命令参数。
+      const name = typeof event.label === "string" ? event.label.trim() : "";
+      const label = name && name.length <= 64 && !/[\\/:?&#=@<>{}\[\]\x00-\x1f]|--\w|[A-Za-z0-9_-]{20,}/.test(name)
+        ? name : "工具调用";
+      const ms = event.elapsed_ms;
+      const elapsed = !Number.isSafeInteger(ms) || ms < 0 ? "" :
+        ms < 1000 ? ms + " ms" : (ms / 1000).toFixed(1) + " 秒";
+      const [, description, statusEl, timeEl] = row.children;
+      const [nameEl, toolEl] = description.children;
+      if (nameEl.textContent !== label) nameEl.textContent = label;
+      const tool = typeof event.tool === "string" && /^[\p{L}\p{N}][\p{L}\p{N} ·+_-]{0,31}$/u.test(event.tool)
+        ? event.tool : "";
+      if (toolEl.textContent !== tool) toolEl.textContent = tool;
+      toolEl.hidden = !tool;
+      if (row.dataset.status !== event.status) {
+        row.dataset.status = event.status;
+        statusEl.textContent = statusNames[event.status];
+      }
+      if (timeEl.textContent !== elapsed) timeEl.textContent = elapsed;
+    }
+    for (const [id, row] of rows) {
+      if (!ids.has(id)) {
+        row.remove();
+        rows.delete(id);
+      }
+    }
+    complete = snapshot.finished === true;
+    if (!rows.size) {
+      card.hidden = true;
+      pill.hidden = false;
+      return;
+    }
+    const phase = complete ? (failed ? "failed" : "done") : "running";
+    if (card.hidden || card.dataset.state !== phase) card.open = !complete;
+    pill.hidden = true;
+    card.hidden = false;
+    card.dataset.state = phase;
+    const summary = (complete ? (failed ? "含失败步骤" : "已结束") : "进行中") + " · " + rows.size + " 步";
+    if (count.textContent !== summary) count.textContent = summary;
+    if (follow) chat.scrollTop = chat.scrollHeight;
+  }
+
+  async function poll() {
+    let wait = document.hidden ? 1500 : 500;
+    try {
+      const response = await fetch("/api/activity?request_id=" + encodeURIComponent(requestId), {
+        cache: "no-store", signal: controller.signal
+      });
+      if (stopped || [404, 405].includes(response.status)) return;
+      if (!response.ok) throw new Error();
+      if (!(response.headers.get("Content-Type") || "").includes("json")) return;
+      const snapshot = await response.json();
+      if (stopped) return;
+      render(snapshot);
+    } catch {
+      wait = 1800;
+    }
+    if (!stopped && !complete) timer = setTimeout(poll, wait);
+  }
+
+  timer = setTimeout(poll, 160);
+  return function finish(snapshot, requestFailed = false) {
+    if (stopped) return;
+    stopped = true;
+    clearTimeout(timer);
+    controller.abort();
+    render(snapshot);
+    if (!rows.size) {
+      article.remove();
+    } else if (!complete || requestFailed) {
+      card.dataset.state = complete ? "failed" : "partial";
+      count.textContent = (complete ? "请求失败" : "未取得完整回执") + " · " + rows.size + " 步";
+      card.open = false;
+    }
+  };
 }
 
 function showEvidence(items) {
@@ -829,7 +939,7 @@ async function submit(text) {
   controls();
 
   appendMessage(instruction, "user");
-  const loader = createThinkingLoader();
+  const finishActivity = trackActivity(request.id);
 
   try {
     const result = await api("/api/chat", {
@@ -841,7 +951,7 @@ async function submit(text) {
         ...(task ? { pending_id: task } : {})
       })
     });
-    loader.remove();
+    finishActivity(result.activity);
     pendingId = result.pending_id || null;
 
     const { article } = appendMessage(result.message || "已完成。", "assistant");
@@ -899,7 +1009,7 @@ async function submit(text) {
     await refreshState(false);
     if (result.row || result.verification) playRevealWave();
   } catch (err) {
-    loader.remove();
+    finishActivity(err.activity, true);
     morphSendButton("idle");
     if (err.networkFailure) {
       retryableRequest = request;
@@ -907,7 +1017,8 @@ async function submit(text) {
       autoResizePrompt();
     }
     const { article } = appendMessage(err.message, "error");
-    article.append(make("p", "本次请求失败 · 未取得模型调用记录", "model-trace"));
+    if (err.agent?.steps?.length) appendModelTrace(article, err.agent);
+    else article.append(make("p", "本次请求失败 · 未取得模型调用记录", "model-trace"));
     showToast(err.message, "error");
   } finally {
     busy = false;

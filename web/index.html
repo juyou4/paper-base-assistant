@@ -118,6 +118,17 @@
           </article>
         </div>
 
+        <template id="activity-template">
+          <details class="activity-card" hidden>
+            <summary class="activity-summary">
+              <span>执行过程</span>
+              <span class="activity-count"></span>
+              <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 6 3 3 3-3"/></svg>
+            </summary>
+            <ol class="activity-list" aria-label="执行步骤"></ol>
+          </details>
+        </template>
+
         <form id="composer" class="composer-outer-shell">
           <div class="composer-card">
             <label class="screenreader" for="prompt">输入指令</label>

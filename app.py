@@ -63,7 +63,7 @@ class Application:
                 "fields": self.table.schema(), "rows": self.table.rows(),
                 "sample": {"title": papers.SAMPLE["title"], "url": "https://arxiv.org/abs/" + papers.SAMPLE_ID},
                 "download_url": "/api/sample.pdf", "feishu_url": self.feishu_url,
-                "capabilities": {"model": agent["enabled"], "agent": agent}}
+                "capabilities": {"model": agent["enabled"], "agent": agent, "activity": True}}
 
     def switch_model(self, chat, name):
         with chat.lock:
@@ -117,6 +117,8 @@ class Handler(BaseHTTPRequestHandler):
         self.dispatch("POST")
 
     def dispatch(self, method):
+        run = None
+        cookie = None
         try:
             if not self.allowed_host():
                 self.send_json({"error": "请从本机服务地址打开。"}, 403)
@@ -126,6 +128,13 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET" and route.path == "/api/state":
                 cookie, chat = self.browser_session()
                 self.send_json(app.state(chat), cookie=cookie)
+            elif method == "GET" and route.path == "/api/activity":
+                ids = parse_qs(route.query).get("request_id", [])
+                if len(ids) != 1:
+                    raise ValueError("请指定一条请求的编号。")
+                request_id = str(uuid.UUID(ids[0]))
+                cookie, chat = self.browser_session()
+                self.send_json(chat.activity.snapshot(request_id), cookie=cookie)
             elif method == "POST" and route.path in {"/api/chat", "/api/model"}:
                 if self.headers.get_content_type() != "application/json":
                     self.send_json({"error": "请求体需要为 JSON。"}, 415)
@@ -146,13 +155,13 @@ class Handler(BaseHTTPRequestHandler):
                 message = body["message"].strip()
                 if not 0 < len(message) <= 2048:
                     raise ValueError("指令需要为 1～2048 个字符。")
-                request_id = body.get("request_id")
-                if request_id is not None:
-                    request_id = str(uuid.UUID(str(request_id)))
-                with chat.lock, model_support.using_model(chat.selected_model), model_support.trace_calls() as steps:
+                request_id = str(uuid.uuid4()) if body.get("request_id") is None else str(uuid.UUID(str(body["request_id"])))
+                run = chat.activity.begin(request_id)
+                with run.recording(), chat.lock, model_support.using_model(chat.selected_model), model_support.trace_calls() as steps:
                     result = chat.respond(message, body.get("pending_id"), request_id)
                     if steps:
                         result["agent"] = {**model_support.agent_info(), "steps": steps}
+                result["activity"] = run.snapshot()
                 self.send_json(result, cookie=cookie)
             elif method == "GET" and route.path in {"/api/sample.pdf", "/api/pdf"}:
                 target = papers.SAMPLE_ID if route.path == "/api/sample.pdf" else parse_qs(route.query).get("paper", [""])[0]
@@ -170,9 +179,15 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             return
         except (ValueError, TableError) as exc:
-            self.send_json({"error": str(exc)}, 400)
+            self.send_error_result(str(exc), 400, run, cookie)
         except Exception:
-            self.send_json({"error": "处理失败，请检查服务配置和数据源，再重试。"}, 500)
+            self.send_error_result("处理失败，请检查服务配置和数据源，再重试。", 500, run, cookie)
+
+    def send_error_result(self, message, code, run, cookie):
+        result = {"error": message}
+        if run is not None:
+            result["activity"] = run.snapshot()
+        self.send_json(result, code, cookie=cookie)
 
 
 def main():

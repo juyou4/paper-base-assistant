@@ -155,6 +155,7 @@ def _mentions_column(rule, identifiers):
 
 class LocalTable:
     name = "阅读清单"
+    tool_name = "SQLite"
 
     def __init__(self, db_path):
         self._db = _connect(db_path)
@@ -306,6 +307,7 @@ def _record(data):
 
 class FeishuTable:
     name = "飞书多维表格"
+    tool_name = "飞书 OpenAPI"
     _host = "https://open.feishu.cn/open-apis"
     _timeout = 12
 
@@ -572,6 +574,7 @@ class FeishuTable:
 class LarkCliTable(FeishuTable):
     """用已登录的官方 CLI 用户身份执行相同的 OpenAPI 请求。"""
 
+    tool_name = "飞书 CLI"
     _timeout = 20
 
     def __init__(self, db_path, cli_cmd, app_token, table_id):
