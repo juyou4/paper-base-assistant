@@ -408,7 +408,7 @@ class Conversation:
                 with step("按论文标识查重并提交记录", tool=self.table_tool):
                     write = self.table.upsert(paper["key"], values, plan["request_id"], **options)
                 with step("按记录 ID 回读并核对字段值", tool=self.table_tool):
-                    row = self.table.get(write["record_id"])
+                    row = self.table.get(write["record_id"], paper_key=paper["key"])
                     if any(row["fields"].get(k) != v for k, v in values.items()):
                         raise ValueError("写入已提交，但当前回读值不一致。请刷新表格核对。")
             except RecordNotFound:
