@@ -1,0 +1,14 @@
+{
+  "title": "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
+  "arxiv_id": "2005.11401v4",
+  "abstract_zh": "作者将预训练生成模型与可检索的维基百科段落结合，并比较了整段回答或逐个词使用检索证据的两种方式。在论文报告的三个开放域问答任务上，这类模型刷新了当时的最佳成绩。",
+  "method": "用 DPR 从维基百科索引中检索相关段落，再让 BART 结合问题和检索到的段落生成回答。",
+  "abstract_source": "作者摘要，第 1 页 · 预先核对的中文概述",
+  "abstract_quote": "a dense vector index of Wikipedia",
+  "abstract_original": "the non-parametric memory is a dense vector index of Wikipedia",
+  "method_source": "第 2.2 节 Retriever: DPR、第 2.3 节 Generator: BART · 预先核对",
+  "method_quote": "2.2 Retriever: DPR / 2.3 Generator: BART",
+  "method_original": "DPR follows a bi-encoder architecture",
+  "original_abstract_url": "https://arxiv.org/abs/2005.11401v4",
+  "original_method_url": "https://arxiv.org/html/2005.11401v4#S2"
+}

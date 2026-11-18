@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f4ee">
+  <title>论文入表助手</title>
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="wrap masthead-inner">
+      <div class="brand"><span class="book-mark" aria-hidden="true"><i></i><i></i><i></i></span>研读工作台</div>
+      <span class="mode" id="mode"><i></i><span>正在连接</span></span>
+    </div>
+  </header>
+  <main class="wrap">
+    <section class="intro" aria-labelledby="title">
+      <div><h1 id="title">论文入表助手</h1><p>贴入论文链接，用一句话更新阅读清单。</p></div>
+      <aside class="sample" hidden id="sample">
+        <div class="sample-label"><span>预先核对的演示论文</span><a id="sample-pdf" hidden target="_blank" rel="noopener noreferrer">查看 PDF ↗</a></div>
+        <div id="sample-title" class="sample-title"></div>
+      </aside>
+    </section>
+    <div class="desk">
+      <section class="panel command-panel" aria-labelledby="command-heading">
+        <div class="panel-head"><span class="panel-mark chat-mark" aria-hidden="true"></span><h2 id="command-heading">自然语言指令</h2></div>
+        <div class="examples">
+          <p class="small-label">点击试用</p>
+          <div class="example-grid">
+            <button type="button" data-example="save">存入示例论文 <span aria-hidden="true">↗</span></button>
+            <button type="button" data-example="method">补充方法概述 <span aria-hidden="true">↗</span></button>
+            <button type="button" data-example="notes">填写笔记 <span aria-hidden="true">↗</span></button>
+          </div>
+        </div>
+        <div class="chat" id="chat" role="log" aria-live="polite" aria-label="指令与回复">
+          <div class="intro-message" id="welcome"><span class="speaker">助手</span><p>发我一篇论文的链接，或点击上方「存入示例论文」开始。</p></div>
+        </div>
+        <form id="composer" class="composer">
+          <label class="screenreader" for="prompt">输入自然语言指令</label>
+          <textarea id="prompt" rows="2" maxlength="4000" placeholder="把这篇论文存进阅读清单……"></textarea>
+          <div class="composer-actions"><span>Enter 发送 · Shift + Enter 换行</span><button id="send" type="submit">发送 <b aria-hidden="true">↗</b></button></div>
+        </form>
+      </section>
+      <section class="panel records-panel" aria-labelledby="records-heading">
+        <div class="panel-head"><span class="panel-mark grid-mark" aria-hidden="true"></span><h2 id="records-heading">阅读清单</h2><button type="button" id="refresh">刷新</button></div>
+        <div class="sheet-summary"><span id="row-count">读取中</span><span id="field-count"></span></div>
+        <div class="sheet-scroll" role="region" aria-label="论文记录表" tabindex="0"><table id="sheet"></table></div>
+        <div id="empty-sheet" class="sheet-empty">正在读取表格…</div>
+        <section class="verification" aria-labelledby="result-heading"><div class="section-heading"><h3 id="result-heading">写入核验</h3></div><div id="verification" role="status" class="verify-status">等待首次写入</div></section>
+        <section class="sources" aria-labelledby="sources-heading"><div class="section-heading"><h3 id="sources-heading">论文依据</h3></div><div id="evidence"><p class="muted">提取摘要或方法后，可在这里核对原文。</p></div></section>
+      </section>
+    </div>
+  </main>
+  <dialog id="detail"><div class="detail-head"><h2>记录详情</h2><button id="close-detail" type="button" aria-label="关闭记录详情">关闭</button></div><dl id="detail-content"></dl></dialog>
+</body>
+</html>

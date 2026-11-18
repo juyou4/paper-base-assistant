@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+/data/
+.venv/
+.env
+.env.*
+*.sqlite3*
+*.mp4
+*.webm
+*.pdf
