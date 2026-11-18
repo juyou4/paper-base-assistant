@@ -371,16 +371,12 @@ h1, h2, h3, p {
   gap: 8px;
 }
 
-.engine-pill {
-  display: inline-flex;
-  align-items: center;
-  height: 32px;
-  padding: 0 11px;
-  border-radius: 999px;
-  background: var(--pill);
+.engine-status {
+  margin-top: 3px;
   color: var(--ink-secondary);
   font-size: 12px;
-  font-weight: 550;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .mode {
@@ -799,6 +795,18 @@ h2 {
   font-size: 13.8px;
 }
 
+.model-trace {
+  margin: 5px 0 0 8px;
+  color: var(--ink-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.model-steps {
+  color: var(--muted);
+}
+
 .thinking-pill {
   display: inline-flex;
   align-items: center;
@@ -1080,8 +1088,14 @@ textarea::placeholder {
 
 .records-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+.feishu-link {
+  text-decoration: none;
+  white-space: nowrap;
 }
 
 .segmented {
@@ -1779,9 +1793,6 @@ dialog::backdrop {
   .wrap,
   .top-capsule {
     width: calc(100% - 24px);
-  }
-  .engine-pill {
-    display: none;
   }
   .intro {
     flex-direction: column;

@@ -33,7 +33,7 @@ def _check_rewordings(items):
         "匹配不能通过。遇到不支持、矛盾或证据不足一律返回 false。只返回 JSON 对象，保留输入中的所有键，"
         "每项格式为 {\"supported\":true 或 false,\"quote\":\"支持判断的连续原文短句\"}。"
     )
-    verdict = model_support.request_json(instruction, items)
+    verdict = model_support.request_json(instruction, items, step="对照原文复核概述")
     if not isinstance(verdict, dict) or set(verdict) != set(items):
         raise ValueError("内容复核结果不完整，尚未提交。")
     for name, item in items.items():

@@ -213,6 +213,12 @@ class Conversation:
 
     def _prepare_admin(self, command):
         from admin_dialog import prepare
+        if command["op"] == "create":
+            kind, name = command["type"], command["name"]
+            label = "文本" if kind == "text" else "链接"
+            return self._ask({"name": name, "kind": kind},
+                             f"将在「{self.table_name}」增加{label}列「{name}」，确认吗？",
+                             ["确认建列", "取消"], "schema")
         if command["op"] == "unclear_edit":
             return self._ask(command, f"你想把整列「{command['target']}」改名为「{command['new_value']}」，"
                              f"还是只把一篇论文在该列的值改为「{command['new_value']}」？",
@@ -296,6 +302,14 @@ class Conversation:
             if re.search(r"别写|不要|不要改|别存|先别|暂不|不写入|只预览", message):
                 return {"message": "已保留原数据。需要写入时，请发论文链接和目标字段。"}
             from admin_dialog import parse_admin
+            if model_support.agent_info()["enabled"]:
+                from agent_router import is_candidate, route
+                if is_candidate(message):
+                    routed = route(message, self.table.schema(), self.table_name)
+                    if routed:
+                        if routed["kind"] == "clarify":
+                            return {"message": routed["message"]}
+                        return self._prepare_admin(routed["command"])
             command = parse_admin(message)
             if command:
                 return self._prepare_admin(command)
@@ -305,9 +319,7 @@ class Conversation:
                 if not name:
                     raise ValueError("请给新字段起一个名字。")
                 kind = "text" if schema_create[1] == "文本" else "url"
-                return self._ask({"name": name, "kind": kind},
-                                 f"将在「{self.table_name}」增加{schema_create[1]}列「{name}」，确认吗？",
-                                 ["确认建列", "取消"], "schema")
+                return self._prepare_admin({"op": "create", "name": name, "type": kind})
             if re.search(r"删除|清空|授权|改权限|改名|重命名", message):
                 return {"message": "请明确要管理的对象。例如“删除字段「临时备注」”或“查看角色「论文审阅人」的权限”。"}
             if len(re.findall(r"https?://", message, re.I)) > 1:
@@ -323,6 +335,10 @@ class Conversation:
                     raise
                 from intent_model import interpret
                 plan = interpret(message, self.table.schema(), self.table_name)
+            else:
+                if model_support.agent_info()["enabled"]:
+                    from intent_model import review_plan
+                    review_plan(message, self.table_name, plan)
             plan["request_id"] = request_id or uuid.uuid4().hex
             if REFERENCE.search(message):
                 return self._load(message, plan)

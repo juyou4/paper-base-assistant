@@ -25,8 +25,6 @@
       </div>
 
       <div class="nav-right">
-        <span class="engine-pill ai-enabled" id="engine-mode" hidden>已接模型</span>
-
         <span class="mode" id="mode" role="status">
           <i aria-hidden="true"></i>
           <span>连接中</span>
@@ -79,7 +77,10 @@
                 <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
               </svg>
             </span>
-            <h2 id="command-heading">对话</h2>
+            <div>
+              <h2 id="command-heading">对话</h2>
+              <p class="engine-status" id="engine-mode" role="status" hidden></p>
+            </div>
           </div>
           <span class="pending-pill" id="pending-badge" hidden>待确认</span>
         </div>
@@ -156,6 +157,12 @@
             </div>
 
             <div class="records-toolbar">
+              <a class="icon-pill feishu-link" id="feishu-link" target="_blank" rel="noopener noreferrer" hidden>
+                打开飞书表格
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M14 4h6v6m0-6L9 15"/><path d="M10 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-4"/>
+                </svg>
+              </a>
               <div class="segmented" id="view-switcher" role="radiogroup" aria-label="视图切换">
                 <span class="seg-highlight" id="seg-highlight" aria-hidden="true"></span>
                 <button type="button" class="seg-btn" role="radio" aria-checked="true" data-view="cards">

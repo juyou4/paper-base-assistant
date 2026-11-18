@@ -13,7 +13,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
 from table_store import FeishuTable, LarkCliTable, LocalTable, TableError, RecordNotFound
-from tools.feishu_setup import resolve_target, save_target
+from tools.feishu_setup import browser_url, resolve_target, save_target
 
 
 KEY = "arxiv:2005.11401"
@@ -358,22 +358,52 @@ class FeishuTableTests(unittest.TestCase):
 
 class TargetSetupTests(unittest.TestCase):
     def test_direct_base_url_only_records_target(self):
+        source = "https://test.feishu.cn/base/testToken?table=tblTarget&view=vewTest"
         with patch("table_store.urlopen", side_effect=AssertionError("直接链接无需联网")):
-            target = resolve_target("https://test.feishu.cn/base/testToken?table=tblTarget", "app")
+            target = resolve_target(source + "&from=clipboard#ignored", "app")
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "feishu-target.json"
             save_target(target, path)
-            self.assertEqual(json.loads(path.read_text(encoding="utf-8")),
-                             {"app_token": "testToken", "table_id": "tblTarget"})
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(saved, {"app_token": "testToken", "table_id": "tblTarget", "source_url": source})
+            self.assertEqual(browser_url(saved, "testToken", "tblTarget"), source)
+
+    def test_browser_url_requires_the_same_effective_target(self):
+        target = {"app_token": "demo", "table_id": "tblOne",
+                  "source_url": "https://office.larksuite.com/base/demo"}
+        self.assertEqual(browser_url(target, "demo", "tblOne"), target["source_url"] + "?table=tblOne")
+        self.assertIsNone(browser_url(target, "other", "tblOne"))
+        self.assertIsNone(browser_url(target, "demo", "tblTwo"))
+        for source in [None, "", "https://office.larksuite.com/base/other?table=tblOne",
+                       "https://office.larksuite.com/base/demo?table=tblTwo",
+                       "https://office.larksuite.com/wiki/other?table=tblOne"]:
+            with self.subTest(source=source):
+                self.assertIsNone(browser_url(dict(target, source_url=source), "demo", "tblOne"))
+
+    def test_unsafe_links_cannot_be_bound_or_published(self):
+        for source in ["http://test.feishu.cn/base/demo", "https://test.feishu.cn.example.org/base/demo",
+                       "https://guest@test.feishu.cn/base/demo", "https://test.feishu.cn:5443/base/demo",
+                       "https://example.org\\@test.feishu.cn/base/demo", "https://test.feishu.cn/docx/demo",
+                       "https://test.feishu.cn/base/demo?table=", "https://test.feishu.cn/base/demo?view=bogus",
+                       "https://test.feishu.cn/base/demo?table=tblOne&table=tblOne"]:
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                resolve_target(source, "cli")
+            self.assertIsNone(browser_url({"app_token": "demo", "table_id": "tblOne", "source_url": source},
+                                          "demo", "tblOne"))
 
     def test_wiki_requires_bitable_node_and_resolves_single_table(self):
         responses = [{"data": {"node": {"obj_type": "bitable", "obj_token": "testToken"}}},
                      {"data": {"items": [{"name": "阅读清单", "table_id": "tblTarget"}]}}]
         with patch.dict("os.environ", {"FEISHU_APP_ID": "dummy", "FEISHU_APP_SECRET": "dummy"}):
             with patch.object(FeishuTable, "_request", side_effect=responses) as req:
-                target = resolve_target("https://test.feishu.cn/wiki/testNode", "app")
+                target = resolve_target("https://test.feishu.cn/wiki/testNode?view=vewTest", "app")
                 self.assertEqual(target["table_id"], "tblTarget")
                 self.assertEqual(target["table_name"], "阅读清单")
+                expected = "https://test.feishu.cn/base/testToken?table=tblTarget&view=vewTest"
+                self.assertEqual(browser_url(target, "testToken", "tblTarget"), expected)
+                for other in [None, expected.replace("test.feishu", "other.feishu"),
+                              expected.replace("vewTest", "vewOther"), expected.replace("testToken", "otherToken")]:
+                    self.assertIsNone(browser_url(dict(target, resolved_url=other), "testToken", "tblTarget"))
                 self.assertTrue(all(call.args[0] == "GET" for call in req.call_args_list))
             with patch.object(FeishuTable, "_request", return_value={"data": {"node": {"obj_type": "docx"}}}):
                 with self.assertRaises(TableError):

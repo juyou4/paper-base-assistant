@@ -8,7 +8,8 @@ import re
 import sys
 import tempfile
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urlsplit
+from typing import NamedTuple
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,19 +17,69 @@ sys.path.insert(0, str(ROOT))
 from table_store import FeishuTable, LarkCliTable, TableError
 
 
-def target_from_url(value):
+class TargetLink(NamedTuple):
+    host: str
+    kind: str
+    token: str
+    table_id: str
+    view_id: str
+
+    def address(self):
+        query = urlencode([(key, value) for key, value in (
+            ("table", self.table_id), ("view", self.view_id)) if value])
+        return f"https://{self.host}/{self.kind}/{self.token}" + ("?" + query if query else "")
+
+
+def _parse_target(value):
+    if not isinstance(value, str) or "\\" in value or re.search(r"[\x00-\x1f\x7f]", value):
+        raise ValueError("请输入完整的飞书多维表格链接。")
     url = urlsplit(value.strip())
     host = (url.hostname or "").lower()
     domains = ("feishu.cn", "larksuite.com", "larkoffice.com")
-    if url.scheme != "https" or not any(host == d or host.endswith("." + d) for d in domains):
+    if (url.scheme != "https" or url.username is not None or url.password is not None
+            or url.port not in (None, 443) or not re.fullmatch(r"[a-z0-9-]+(?:\.[a-z0-9-]+)+", host)
+            or not any(host == d or host.endswith("." + d) for d in domains)):
         raise ValueError("请输入飞书或 Lark 的 HTTPS 多维表格链接。")
     route = re.fullmatch(r"/(base|wiki)/([A-Za-z0-9_-]+)/?", url.path)
     if not route:
         raise ValueError("请从多维表格复制含 /base/ 或 /wiki/ 的地址。")
-    tables = parse_qs(url.query).get("table", [])
-    if tables and (len(tables) != 1 or not re.fullmatch(r"tbl[A-Za-z0-9_-]+", tables[0])):
-        raise ValueError("链接里的 table 参数无效，请点开目标数据表后再复制地址。")
-    return route[1], route[2], tables[0] if tables else ""
+    params = parse_qs(url.query, keep_blank_values=True)
+    coords = {}
+    for key, prefix in (("table", "tbl"), ("view", "vew")):
+        values = params.get(key, [])
+        if values and (len(values) != 1 or not re.fullmatch(prefix + r"[A-Za-z0-9_-]+", values[0])):
+            raise ValueError(f"链接里的 {key} 参数无效，请点开目标数据表后再复制地址。")
+        coords[key] = values[0] if values else ""
+    return TargetLink(host, route[1], route[2], coords["table"], coords["view"])
+
+
+def target_from_url(value):
+    target = _parse_target(value)
+    return target.kind, target.token, target.table_id
+
+
+def browser_url(config, effective_base, effective_table):
+    """只为当前实际使用的 Base 和数据表生成浏览地址。旧配置可重新绑定。"""
+    if (not isinstance(config, dict) or not isinstance(effective_base, str)
+            or not isinstance(effective_table, str) or config.get("app_token") != effective_base
+            or config.get("table_id") != effective_table or not re.fullmatch(r"[A-Za-z0-9_-]+", effective_base)
+            or not re.fullmatch(r"tbl[A-Za-z0-9_-]+", effective_table)):
+        return None
+    try:
+        source = _parse_target(config.get("source_url"))
+        if source.table_id and source.table_id != effective_table:
+            return None
+        if source.kind == "base":
+            if source.token != effective_base:
+                return None
+        else:
+            # Wiki 的节点标识不同于 Base。仅接受配置器解析并保存的正式落点。
+            resolved = _parse_target(config.get("resolved_url"))
+            if resolved != TargetLink(source.host, "base", effective_base, effective_table, source.view_id):
+                return None
+        return TargetLink(source.host, "base", effective_base, effective_table, source.view_id).address()
+    except ValueError:
+        return None
 
 
 def choose_table(api, app_token):
@@ -60,9 +111,10 @@ def choose_table(api, app_token):
 
 
 def resolve_target(url, mode):
-    route, token, table_id = target_from_url(url)
+    source = _parse_target(url)
+    route, token, table_id = source.kind, source.token, source.table_id
     if route == "base" and table_id:
-        return {"app_token": token, "table_id": table_id}
+        return {"app_token": token, "table_id": table_id, "source_url": source.address()}
     # 链接未给出全部坐标时，仅用所选身份读取 Wiki 节点或数据表列表。
     if mode == "app":
         api = FeishuTable(":memory:", os.environ.get("FEISHU_APP_ID", ""),
@@ -76,12 +128,16 @@ def resolve_target(url, mode):
             if node.get("obj_type") != "bitable" or not node.get("obj_token"):
                 raise TableError("此知识库节点指向的内容类型不属于飞书多维表格。")
             token = node["obj_token"]
-        result = {"app_token": token, "table_id": table_id}
+        result = {"app_token": token, "table_id": table_id, "source_url": source.address()}
         if not table_id:
             selected = choose_table(api, token)
             result["table_id"] = selected["table_id"]
             if selected.get("name"):
                 result["table_name"] = selected["name"]
+        if route == "wiki":
+            result["resolved_url"] = TargetLink(source.host, "base", token, result["table_id"], source.view_id).address()
+        if not browser_url(result, token, result["table_id"]):
+            raise TableError("飞书返回的目标数据表地址无效。")
         return result
     finally:
         api._db.close()

@@ -50,6 +50,63 @@ function link(label, url, className) {
   return a;
 }
 
+function feishuTableLink(address) {
+  if (typeof address !== "string") return null;
+  try {
+    const url = new URL(address);
+    const allowedDomains = ["feishu.cn", "larksuite.com", "larkoffice.com"];
+    if (url.protocol !== "https:" || url.username || url.password || url.port ||
+        !allowedDomains.some(domain => url.hostname === domain || url.hostname.endsWith("." + domain)) ||
+        !/^\/(?:base|wiki)\/[A-Za-z0-9_-]+\/?$/.test(url.pathname)) return null;
+    const target = new URL(url.pathname, url.origin);
+    for (const [key, pattern] of [["table", /^tbl[A-Za-z0-9_-]+$/], ["view", /^vew[A-Za-z0-9_-]+$/]]) {
+      const values = url.searchParams.getAll(key);
+      if (!values.length) continue;
+      if (values.length !== 1 || !pattern.test(values[0])) return null;
+      target.searchParams.set(key, values[0]);
+    }
+    return target.href;
+  } catch {
+    return null;
+  }
+}
+
+function modelName(agent) {
+  return [agent?.provider, agent?.model]
+    .filter(value => typeof value === "string" && value.trim())
+    .map(value => value.trim())
+    .join(" / ");
+}
+
+function renderConnectionDetails() {
+  const status = byId("engine-mode");
+  const agent = state.capabilities.agent;
+  const enabled = agent?.enabled ?? state.capabilities.model;
+  status.hidden = !ready || typeof enabled !== "boolean";
+  if (!status.hidden) {
+    const name = modelName(agent);
+    status.textContent = enabled ? "已配置模型" + (name ? " · " + name : "") : "模型未配置";
+  }
+  const target = ready && state.mode === "feishu" ? feishuTableLink(state.feishu_url) : null;
+  const external = byId("feishu-link");
+  external.hidden = !target;
+  if (target) external.href = target;
+  else external.removeAttribute("href");
+}
+
+function appendModelTrace(article, agent) {
+  const steps = Array.isArray(agent?.steps)
+    ? agent.steps.filter(step => typeof step === "string" && step.trim()) : [];
+  if (!steps.length) {
+    article.append(make("p", "本次回复 · 未调用模型", "model-trace"));
+    return;
+  }
+  const trace = make("div", undefined, "model-trace");
+  trace.append(make("p", "本次使用模型 · " + (modelName(agent) || "已调用")));
+  trace.append(make("p", steps.join(" → "), "model-steps"));
+  article.append(trace);
+}
+
 function shortHost(address) {
   try {
     return new URL(address).hostname.replace(/^www\./i, "");
@@ -585,7 +642,7 @@ function renderState() {
   mode.className = "mode connected";
   mode.lastElementChild.textContent = state.mode === "feishu" ? "飞书多维表格" : "本地 SQLite";
 
-  byId("engine-mode").hidden = !state.capabilities?.model;
+  renderConnectionDetails();
 
   byId("records-heading").textContent = state.table_name || "阅读清单";
   const populatedRows = state.rows.filter(row => Object.values(row.fields || {}).some(hasCellValue));
@@ -635,6 +692,7 @@ async function refreshState(manual = false) {
   } catch (err) {
     if (token !== latestStateRequest) return;
     ready = false;
+    renderConnectionDetails();
     byId("mode").className = "mode error";
     byId("mode").lastElementChild.textContent = "连接失败";
     byId("cards-view").hidden = true;
@@ -663,46 +721,17 @@ function appendMessage(content, kind = "assistant") {
 }
 
 function createThinkingLoader() {
-  const steps = ["正在处理…", "读取论文…", "核对表格…"];
-  let idx = 0;
-
   const article = make("article", undefined, "message assistant");
   const pill = make("div", undefined, "thinking-pill");
   pill.innerHTML = ICONS.spinner8;
-  const label = make("span", steps[0], "thinking-step");
-  pill.append(label);
+  pill.append(make("span", "正在处理…", "thinking-step"));
   article.append(pill);
 
   const chat = byId("chat");
   chat.append(article);
   chat.scrollTop = chat.scrollHeight;
 
-  const timer = setInterval(() => {
-    idx = (idx + 1) % steps.length;
-    const prevW = pill.offsetWidth;
-    label.textContent = steps[idx];
-    const nextW = pill.offsetWidth;
-    if (motionOk() && prevW > 0 && Math.abs(prevW - nextW) > 1) {
-      pill.animate([{ width: prevW + "px" }, { width: nextW + "px" }], {
-        duration: 280,
-        easing: "cubic-bezier(0.22, 1, 0.36, 1)"
-      });
-      label.animate(
-        [
-          { opacity: 0, filter: "blur(4px)", transform: "translateY(5px)" },
-          { opacity: 1, filter: "blur(0)", transform: "translateY(0)" }
-        ],
-        { duration: 240, easing: "cubic-bezier(0.22, 1, 0.36, 1)" }
-      );
-    }
-  }, 800);
-
-  return {
-    remove() {
-      clearInterval(timer);
-      article.remove();
-    }
-  };
+  return article;
 }
 
 function showEvidence(items) {
@@ -764,6 +793,7 @@ async function submit(text) {
     pendingId = result.pending_id || null;
 
     const { article } = appendMessage(result.message || "已完成。", "assistant");
+    appendModelTrace(article, result.agent);
 
     if (pendingId && Array.isArray(result.choices) && result.choices.length) {
       const choices = make("div", undefined, "choices");
@@ -824,7 +854,8 @@ async function submit(text) {
       byId("prompt").value = instruction;
       autoResizePrompt();
     }
-    appendMessage(err.message, "error");
+    const { article } = appendMessage(err.message, "error");
+    article.append(make("p", "本次请求失败 · 未取得模型调用记录", "model-trace"));
     showToast(err.message, "error");
   } finally {
     busy = false;

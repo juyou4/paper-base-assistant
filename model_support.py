@@ -1,22 +1,53 @@
-"""可选的中文提取；请求只携带所选字段的论文原文，不授予模型任何工具。"""
+"""通过 Codex CLI 或兼容接口解析意图、生成并复核中文概述，记录本次成功的模型调用。"""
 
 import ipaddress
 import json
 import os
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 FIELD_NAMES = {"abstract": "abstract_zh", "method": "method"}
+_active_steps = ContextVar("paper_model_steps", default=None)
+
+
+def agent_info():
+    provider = os.getenv("PAPER_AGENT_PROVIDER", "compatible").strip().lower()
+    name = os.getenv("PAPER_MODEL_NAME", "").strip()
+    if provider == "codex":
+        return {"enabled": True, "provider": "Codex CLI", "model": name or "CLI 默认模型"}
+    if provider == "rules":
+        return {"enabled": False, "provider": "", "model": ""}
+    if provider != "compatible":
+        raise ValueError("请选择 codex、compatible 或 rules 作为 Agent 后端。")
+    configured = bool(os.getenv("PAPER_MODEL_URL", "").strip() and name)
+    return {"enabled": configured, "provider": "Chat Completions" if configured else "", "model": name if configured else ""}
+
+
+@contextmanager
+def trace_calls():
+    steps = []
+    token = _active_steps.set(steps)
+    try:
+        yield steps
+    finally:
+        _active_steps.reset(token)
 
 
 def enabled():
-    return bool(os.environ.get("PAPER_MODEL_URL", "").strip() and os.environ.get("PAPER_MODEL_NAME", "").strip())
+    return agent_info()["enabled"]
 
 
 def _config():
+    selected = os.getenv("PAPER_AGENT_PROVIDER", "compatible").strip().lower()
+    if selected == "codex":
+        return None, os.getenv("PAPER_MODEL_NAME", "").strip() or None, ""
+    if selected == "rules":
+        return None
     url = os.environ.get("PAPER_MODEL_URL", "").strip()
     name = os.environ.get("PAPER_MODEL_NAME", "").strip()
     key = os.environ.get("PAPER_MODEL_KEY", "").strip()
@@ -55,19 +86,31 @@ def _request(config, excerpts):
         "quote 从当前字段逐字连续截取，长度 12 至 180 个字符，优先能支撑中文概述的具体句子。"
         "缺少足够证据时省略该字段。"
     )
-    return _chat(config, instructions, excerpts)
+    return _chat(config, instructions, excerpts, "提取中文概述")
 
 
-def request_json(instructions, payload):
+def request_json(instructions, payload, *, step="理解操作意图"):
     """供受约束的意图分类使用，与提取模块共用配置和响应格式。"""
     config = _config()
     if config is None:
         raise ValueError("尚未配置可选模型。")
-    return _chat(config, instructions, payload)
+    return _chat(config, instructions, payload, step)
 
 
-def _chat(config, instructions, payload):
+def _chat(config, instructions, payload, step):
     url, model, key = config
+    if url is None:
+        from codex_provider import request
+        answer = request(instructions, payload, model)
+    else:
+        answer = _compatible_chat(url, model, key, instructions, payload)
+    steps = _active_steps.get()
+    if steps is not None:
+        steps.append(step)
+    return answer
+
+
+def _compatible_chat(url, model, key, instructions, payload):
     body = {"model": model, "messages": [
         {"role": "system", "content": instructions},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},

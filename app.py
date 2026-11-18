@@ -40,6 +40,10 @@ class Application:
         else:
             self.table = LarkCliTable(db, os.getenv("LARK_CLI", "lark-cli"), base, table_id)
         self.name = self.table.name if mode == "local" else (os.getenv("FEISHU_TABLE_NAME") or config.get("table_name") or "飞书测试表")
+        self.feishu_url = ""
+        if mode != "local":
+            from tools.feishu_setup import browser_url
+            self.feishu_url = browser_url(config, base, table_id)
         self.sessions = {}
         self.lock = threading.Lock()
 
@@ -57,7 +61,8 @@ class Application:
         return {"mode": "local" if self.mode == "local" else "feishu", "table_name": self.name,
                 "fields": self.table.schema(), "rows": self.table.rows(),
                 "sample": {"title": papers.SAMPLE["title"], "url": "https://arxiv.org/abs/" + papers.SAMPLE_ID},
-                "download_url": "/api/sample.pdf", "capabilities": {"model": model_support.enabled()}}
+                "download_url": "/api/sample.pdf", "feishu_url": self.feishu_url,
+                "capabilities": {"model": model_support.enabled(), "agent": model_support.agent_info()}}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -129,7 +134,10 @@ class Handler(BaseHTTPRequestHandler):
                 request_id = body.get("request_id")
                 if request_id is not None:
                     request_id = str(uuid.UUID(str(request_id)))
-                result = chat.respond(message, body.get("pending_id"), request_id)
+                with model_support.trace_calls() as steps:
+                    result = chat.respond(message, body.get("pending_id"), request_id)
+                    if steps:
+                        result["agent"] = {**model_support.agent_info(), "steps": steps}
                 self.send_json(result, cookie=cookie)
             elif method == "GET" and route.path in {"/api/sample.pdf", "/api/pdf"}:
                 target = papers.SAMPLE_ID if route.path == "/api/sample.pdf" else parse_qs(route.query).get("paper", [""])[0]
@@ -155,10 +163,16 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description="论文入表助手")
     parser.add_argument("--mode", choices=["local", "feishu", "feishu-cli"], default=os.getenv("PAPER_BASE_MODE", "local"))
+    parser.add_argument("--agent", choices=["codex", "compatible", "rules"], help="选择真实推理后端或本地规则模式")
+    parser.add_argument("--model", help="交给推理后端的模型名称")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
     parser.add_argument("--open", action="store_true", help="启动后打开本机浏览器")
     args = parser.parse_args()
+    if args.agent:
+        os.environ["PAPER_AGENT_PROVIDER"] = args.agent
+    if args.model:
+        os.environ["PAPER_MODEL_NAME"] = args.model
     app = Application(args.mode, args.data_dir)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     server.app = app
