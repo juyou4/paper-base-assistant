@@ -107,6 +107,7 @@ class Conversation:
         self.last = None
         self.last_title = ""
         self.pending = None
+        self.selected_model = None
         self.lock = threading.RLock()
 
     def _ask(self, plan, message, choices, stage):

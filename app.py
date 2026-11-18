@@ -57,12 +57,22 @@ class Application:
             self.sessions[cookie][1] = now
             return cookie, self.sessions[cookie][0]
 
-    def state(self):
+    def state(self, chat=None):
+        agent = model_support.selection_info(chat.selected_model if chat else None)
         return {"mode": "local" if self.mode == "local" else "feishu", "table_name": self.name,
                 "fields": self.table.schema(), "rows": self.table.rows(),
                 "sample": {"title": papers.SAMPLE["title"], "url": "https://arxiv.org/abs/" + papers.SAMPLE_ID},
                 "download_url": "/api/sample.pdf", "feishu_url": self.feishu_url,
-                "capabilities": {"model": model_support.enabled(), "agent": model_support.agent_info()}}
+                "capabilities": {"model": agent["enabled"], "agent": agent}}
+
+    def switch_model(self, chat, name):
+        with chat.lock:
+            info = model_support.selection_info(chat.selected_model)
+            if not isinstance(name, str) or not info["enabled"] or name not in info["models"]:
+                raise ValueError("请选择当前推理服务提供的模型。")
+            default = model_support.agent_info()["model"]
+            chat.selected_model = None if name == default else name
+            return {"agent": {**info, "model": name}, "message": f"当前对话已选择 {name}。"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -86,13 +96,13 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def send_json(self, data, code=200, cookie=None):
-        headers = {"Set-Cookie": f"paper_session={cookie}; HttpOnly; SameSite=Strict; Path=/"} if cookie else {}
+        headers = {"Set-Cookie": f"paper_session_{self.server.server_port}={cookie}; HttpOnly; SameSite=Strict; Path=/"} if cookie else {}
         self.send_body(json.dumps(data, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", code, headers)
 
     def browser_session(self):
         jar = SimpleCookie()
         jar.load(self.headers.get("Cookie", ""))
-        sid = jar.get("paper_session")
+        sid = jar.get(f"paper_session_{self.server.server_port}") or jar.get("paper_session")
         return self.server.app.session(sid.value if sid else None)
 
     def allowed_host(self):
@@ -114,9 +124,9 @@ class Handler(BaseHTTPRequestHandler):
             route = urlsplit(self.path)
             app = self.server.app
             if method == "GET" and route.path == "/api/state":
-                cookie, _ = self.browser_session()
-                self.send_json(app.state(), cookie=cookie)
-            elif method == "POST" and route.path == "/api/chat":
+                cookie, chat = self.browser_session()
+                self.send_json(app.state(chat), cookie=cookie)
+            elif method == "POST" and route.path in {"/api/chat", "/api/model"}:
                 if self.headers.get_content_type() != "application/json":
                     self.send_json({"error": "请求体需要为 JSON。"}, 415)
                     return
@@ -125,16 +135,21 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"error": "指令太长或为空。"}, 400)
                     return
                 body = json.loads(self.rfile.read(length))
+                cookie, chat = self.browser_session()
+                if route.path == "/api/model":
+                    if not isinstance(body, dict) or set(body) != {"model"}:
+                        raise ValueError("请选择一个模型。")
+                    self.send_json(app.switch_model(chat, body["model"]), cookie=cookie)
+                    return
                 if not isinstance(body, dict) or not isinstance(body.get("message"), str):
                     raise ValueError("请发送一条文字指令。")
                 message = body["message"].strip()
                 if not 0 < len(message) <= 2048:
                     raise ValueError("指令需要为 1～2048 个字符。")
-                cookie, chat = self.browser_session()
                 request_id = body.get("request_id")
                 if request_id is not None:
                     request_id = str(uuid.UUID(str(request_id)))
-                with model_support.trace_calls() as steps:
+                with chat.lock, model_support.using_model(chat.selected_model), model_support.trace_calls() as steps:
                     result = chat.respond(message, body.get("pending_id"), request_id)
                     if steps:
                         result["agent"] = {**model_support.agent_info(), "steps": steps}

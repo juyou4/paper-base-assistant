@@ -13,11 +13,25 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 FIELD_NAMES = {"abstract": "abstract_zh", "method": "method"}
 _active_steps = ContextVar("paper_model_steps", default=None)
+_active_model = ContextVar("paper_session_model", default=None)
+
+
+@contextmanager
+def using_model(model):
+    token = _active_model.set(model)
+    try:
+        yield
+    finally:
+        _active_model.reset(token)
+
+
+def _model_name():
+    return _active_model.get() or os.getenv("PAPER_MODEL_NAME", "").strip()
 
 
 def agent_info():
     provider = os.getenv("PAPER_AGENT_PROVIDER", "compatible").strip().lower()
-    name = os.getenv("PAPER_MODEL_NAME", "").strip()
+    name = _model_name()
     if provider == "codex":
         return {"enabled": True, "provider": "Codex CLI", "model": name or "CLI 默认模型"}
     if provider == "rules":
@@ -26,6 +40,22 @@ def agent_info():
         raise ValueError("请选择 codex、compatible 或 rules 作为 Agent 后端。")
     configured = bool(os.getenv("PAPER_MODEL_URL", "").strip() and name)
     return {"enabled": configured, "provider": "Chat Completions" if configured else "", "model": name if configured else ""}
+
+
+def selection_info(selected=None):
+    with using_model(None):
+        info = agent_info()
+    current = info["model"]
+    choices = [current] if info["enabled"] else []
+    if info["provider"] == "Codex CLI":
+        from codex_provider import available_models
+        choices.extend(available_models())
+    elif info["enabled"]:
+        choices.extend(s.strip() for s in os.getenv("PAPER_MODEL_CHOICES", "").split(",") if s.strip())
+    if selected and info["enabled"]:
+        choices.append(selected)
+    choices = list(dict.fromkeys(choices))
+    return {**info, "model": selected or current, "models": choices, "selectable": len(choices) > 1}
 
 
 @contextmanager
@@ -45,11 +75,11 @@ def enabled():
 def _config():
     selected = os.getenv("PAPER_AGENT_PROVIDER", "compatible").strip().lower()
     if selected == "codex":
-        return None, os.getenv("PAPER_MODEL_NAME", "").strip() or None, ""
+        return None, _model_name() or None, ""
     if selected == "rules":
         return None
     url = os.environ.get("PAPER_MODEL_URL", "").strip()
-    name = os.environ.get("PAPER_MODEL_NAME", "").strip()
+    name = _model_name()
     key = os.environ.get("PAPER_MODEL_KEY", "").strip()
     if not (url or name or key):
         return None

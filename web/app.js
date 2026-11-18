@@ -23,6 +23,8 @@ const ICONS = {
 let state = { fields: [], rows: [], sample: {}, capabilities: {} };
 let busy = false;
 let ready = false;
+let switchingModel = false;
+let refreshingState = false;
 let pendingId = null;
 let selectedId = null;
 let viewMode = "cards";
@@ -87,6 +89,14 @@ function renderConnectionDetails() {
     const name = modelName(agent);
     status.textContent = enabled ? "已配置模型" + (name ? " · " + name : "") : "模型未配置";
   }
+  const select = byId("model-select");
+  const models = Array.isArray(agent?.models)
+    ? [...new Set(agent.models.filter(model => typeof model === "string" && model.trim()))] : [];
+  byId("model-picker").hidden = !ready || agent?.selectable !== true || !models.includes(agent.model);
+  if (models.length !== select.length || models.some((model, index) => model !== select.options[index].value)) {
+    select.replaceChildren(...models.map(model => new Option(model, model)));
+  }
+  select.value = agent?.model || "";
   const target = ready && state.mode === "feishu" ? feishuTableLink(state.feishu_url) : null;
   const external = byId("feishu-link");
   external.hidden = !target;
@@ -419,18 +429,57 @@ function autoResizePrompt() {
 
 function controls() {
   const input = byId("prompt");
-  byId("send").disabled = busy || !ready || !input.value.trim();
+  const locked = busy || switchingModel || refreshingState || !ready;
+  byId("send").disabled = locked || !input.value.trim();
   input.disabled = busy || !ready;
-  byId("refresh").disabled = busy;
+  byId("refresh").disabled = busy || switchingModel || refreshingState;
+  byId("model-select").disabled = locked;
+  byId("model-picker").setAttribute("aria-busy", String(switchingModel));
+  byId("model-picker-label").textContent = switchingModel ? "切换中" : "模型";
   byId("pending-badge").hidden = !pendingId;
   document.querySelectorAll("[data-example]").forEach(btn => {
-    btn.disabled = busy || !ready || Boolean(pendingId);
+    btn.disabled = locked || Boolean(pendingId);
   });
   document.querySelectorAll("[data-choice]").forEach(btn => {
-    btn.disabled = busy || !ready || btn.dataset.task !== pendingId;
+    btn.disabled = locked || btn.dataset.task !== pendingId;
   });
   const emptyCta = byId("empty-try-btn");
-  if (emptyCta) emptyCta.disabled = busy || !ready || Boolean(pendingId);
+  if (emptyCta) emptyCta.disabled = locked || Boolean(pendingId);
+}
+
+async function switchModel() {
+  const select = byId("model-select");
+  const requested = select.value;
+  const current = state.capabilities.agent;
+  if (!ready || busy || switchingModel || refreshingState || !current?.selectable ||
+      !current.models?.includes(requested) || current.model === requested) return;
+
+  // 发送前以会话回执为准。网络中断时，再读一次服务端状态。
+  const restoreFocus = document.activeElement === select;
+  switchingModel = true;
+  controls();
+  try {
+    const result = await api("/api/model", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: requested })
+    });
+    if (result.agent?.model !== requested || !Array.isArray(result.agent.models) ||
+        !result.agent.models.includes(requested)) throw new Error("服务未确认所选模型。");
+    state.capabilities.agent = result.agent;
+    renderConnectionDetails();
+    showToast(result.message || "已切换至 " + requested);
+  } catch (err) {
+    select.value = current.model;
+    await refreshState();
+    showToast(err.message, "error");
+  } finally {
+    switchingModel = false;
+    controls();
+    if (restoreFocus && document.activeElement === document.body && !byId("model-picker").hidden) {
+      select.focus({ preventScroll: true });
+    }
+  }
 }
 
 async function api(path, options) {
@@ -674,6 +723,8 @@ function renderState() {
 
 async function refreshState(manual = false) {
   const token = ++latestStateRequest;
+  refreshingState = true;
+  controls();
   const refreshBtn = byId("refresh");
   if (manual) refreshBtn.classList.add("spinning");
   try {
@@ -703,6 +754,7 @@ async function refreshState(manual = false) {
     if (!state.rows.length) byId("row-count").textContent = "未取得记录";
     if (manual) showToast(err.message, "error");
   } finally {
+    if (token === latestStateRequest) refreshingState = false;
     if (manual) setTimeout(() => refreshBtn.classList.remove("spinning"), 650);
     controls();
   }
@@ -764,7 +816,7 @@ function showEvidence(items) {
 
 async function submit(text) {
   const instruction = text.trim();
-  if (!instruction || busy || !ready) return;
+  if (!instruction || busy || switchingModel || refreshingState || !ready) return;
   const task = pendingId;
   const matchingRetry = retryableRequest?.message === instruction && retryableRequest.task === task;
   const request = matchingRetry ? retryableRequest : { id: crypto.randomUUID(), message: instruction, task };
@@ -919,6 +971,10 @@ segButtons.forEach((btn, idx) => {
 
 window.addEventListener("resize", () => selectView(viewMode, false));
 
+byId("model-select").addEventListener("change", switchModel);
+window.addEventListener("pageshow", event => {
+  if (event.persisted && !busy && !switchingModel) refreshState();
+});
 byId("refresh").addEventListener("click", () => refreshState(true));
 byId("close-detail").addEventListener("click", () => byId("detail").close());
 byId("detail").addEventListener("click", event => {

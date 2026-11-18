@@ -19,6 +19,63 @@ def result(value):
 
 
 class CodexProviderTests(unittest.TestCase):
+    def test_catalog_projects_visible_slugs_in_priority_order_and_caches(self):
+        directory = {
+            "models": [
+                {"slug": "second", "visibility": "list", "priority": 5, "base_instructions": "private"},
+                {"slug": "internal", "visibility": "hide", "priority": 0},
+                {"slug": "first", "visibility": "list", "priority": 1},
+                {"slug": "second", "visibility": "list", "priority": 3},
+                {"slug": "--unsafe", "visibility": "list"},
+                {"slug": "old"},
+                {"slug": "unranked", "visibility": "list", "priority": "unexpected"},
+                None,
+            ]
+        }
+        self.addCleanup(provider._catalog.cache_clear)
+        provider._catalog.cache_clear()
+        def fake_list(args, **options):
+            self.assertEqual(args[:3], ["official-codex", "debug", "models"])
+            self.assertIn('model_provider="openai"', args)
+            self.assertIn("mcp_servers={}", args)
+            self.assertIn("shell_tool", args)
+            self.assertNotIn("FEISHU_APP_SECRET", options["env"])
+            self.assertFalse(options.get("shell"))
+            self.assertEqual(options["creationflags"], provider._NO_WINDOW)
+            self.assertEqual(list(Path(options["cwd"]).iterdir()), [])
+            return subprocess.CompletedProcess(args, 0, json.dumps(directory).encode(), b"")
+        env = {"FEISHU_APP_SECRET": "private", "PAPER_MODEL_NAME": "unlisted", "CODEX_HOME": "account1"}
+        with patch.dict(os.environ, env), patch.object(provider, "find_cli", return_value="official-codex"), \
+                patch.object(provider, "_features", return_value={"shell_tool"}), \
+                patch.object(provider.time, "monotonic", return_value=10), \
+                patch.object(subprocess, "run", side_effect=fake_list) as run:
+            expected = ["first", "second", "unranked"]
+            self.assertEqual(provider.available_models(), expected)
+            self.assertEqual(provider.available_models(), expected)
+            self.assertEqual(run.call_count, 1)
+            with patch.dict(os.environ, {"CODEX_HOME": "account2"}):
+                self.assertEqual(provider.available_models(), expected)
+            self.assertEqual(run.call_count, 2)
+
+    def test_unsupported_or_invalid_catalog_falls_back_only_to_explicit_setting(self):
+        failures = (subprocess.CompletedProcess([], 1, b"unsupported", b"redacted"),
+                    subprocess.CompletedProcess([], 0, b"broken JSON", b""),
+                    subprocess.CompletedProcess([], 0, b'{"models": "broken"}', b""),
+                    subprocess.CompletedProcess([], 0, b'{"models":[{"slug":"internal","visibility":"hide"}]}', b""),
+                    subprocess.TimeoutExpired("codex", 8))
+        self.addCleanup(provider._catalog.cache_clear)
+        with patch.object(provider, "find_cli", return_value="official"), \
+                patch.object(provider, "_features", return_value=set()):
+            for failure in failures:
+                provider._catalog.cache_clear()
+                with self.subTest(failure=type(failure).__name__), \
+                        patch.object(subprocess, "run", side_effect=[failure]), \
+                        patch.dict(os.environ, {"PAPER_MODEL_NAME": "my-model"}):
+                    self.assertEqual(provider.available_models(), ["my-model"])
+        with patch.object(provider, "find_cli", side_effect=ValueError("missing")), \
+                patch.dict(os.environ, {"PAPER_MODEL_NAME": "secret text"}):
+            self.assertEqual(provider.available_models(), [])
+
     def test_isolated_invocation_and_structured_response(self):
         captured = {}
         def fake_run(args, **kwargs):

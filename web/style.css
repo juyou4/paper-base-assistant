@@ -940,6 +940,7 @@ h2 {
 }
 
 .composer-card {
+  container-type: inline-size;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 17px;
@@ -996,6 +997,93 @@ textarea::placeholder {
   border-radius: 5px;
   background: var(--tray);
   border: 1px solid var(--border);
+}
+
+.model-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  margin-inline-start: auto;
+  color: var(--ink-secondary);
+  font-size: 12px;
+}
+
+.model-picker > span { white-space: nowrap; }
+
+#model-select {
+  max-width: min(180px, 42vw);
+  min-width: 0;
+  height: 32px;
+  padding-inline: 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--pill);
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+  text-overflow: ellipsis;
+}
+
+#model-select:focus-visible {
+  outline: 2px solid var(--ink-secondary);
+  outline-offset: 2px;
+}
+
+#model-select:disabled { opacity: .65; cursor: default; }
+
+@container (max-width: 400px) {
+  .composer-actions:has(.model-picker:not([hidden])) .composer-hint { display: none; }
+}
+
+/* 模型列表以底栏按钮为锚点，向上展开。较早浏览器使用系统选择器。 */
+@supports (appearance: base-select) and selector(::picker(select)) {
+  #model-select, #model-select::picker(select) { appearance: base-select; }
+
+  #model-select { align-items: center; gap: 7px; }
+  #model-select::picker-icon { color: var(--muted); }
+  #model-select:open::picker-icon { rotate: 180deg; }
+  #model-select::picker(select) {
+    position-area: block-start span-inline-start;
+    justify-self: end;
+    margin-block-end: 6px;
+    min-inline-size: min(200px, calc(100vw - 32px));
+    max-inline-size: calc(100vw - 32px);
+    max-block-size: min(270px, 40vh);
+    overflow: auto;
+    padding: 4px;
+    border: 1px solid var(--border-strong);
+    border-radius: 13px;
+    background: var(--card);
+    color: var(--ink);
+    box-shadow: var(--shadow-capsule);
+    transform-origin: bottom right;
+  }
+
+  #model-select option {
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 9px;
+    overflow-wrap: anywhere;
+    font: 500 13px/1.4 var(--font-sans);
+  }
+
+  #model-select option:is(:hover, :focus-visible) { background: var(--pill); }
+  #model-select option::checkmark { order: 1; margin-inline-start: auto; color: var(--accent); }
+
+  @media (prefers-reduced-motion: no-preference) {
+    #model-select::picker-icon { transition: rotate 160ms ease; }
+    #model-select::picker(select) {
+      opacity: 0;
+      transform: translateY(6px) scale(.97);
+      transition: opacity 160ms ease, transform 180ms var(--ease-spring),
+        display 180ms allow-discrete, overlay 180ms allow-discrete;
+    }
+    #model-select:open::picker(select) { opacity: 1; transform: none; }
+    @starting-style {
+      #model-select:open::picker(select) { opacity: 0; transform: translateY(6px) scale(.97); }
+    }
+  }
 }
 
 .send-pill {

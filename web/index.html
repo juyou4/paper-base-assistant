@@ -124,6 +124,10 @@
             <textarea id="prompt" rows="2" maxlength="2048" placeholder="贴入论文链接，或说“给刚才那篇补一句方法概述”…"></textarea>
             <div class="composer-actions">
               <span class="composer-hint"><kbd>Enter</kbd> 发送 · <kbd>Shift + Enter</kbd> 换行</span>
+              <label class="model-picker" id="model-picker" hidden>
+                <span id="model-picker-label" aria-hidden="true">模型</span>
+                <select id="model-select" aria-label="选择对话模型"></select>
+              </label>
               <button id="send" type="submit" class="send-pill">
                 <span class="send-inner">
                   <span>发送</span>
