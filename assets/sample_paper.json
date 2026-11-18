@@ -7,7 +7,7 @@
   "abstract_quote": "a dense vector index of Wikipedia",
   "abstract_original": "the non-parametric memory is a dense vector index of Wikipedia",
   "method_source": "第 2.2 节 Retriever: DPR、第 2.3 节 Generator: BART · 预先核对",
-  "method_quote": "2.2 Retriever: DPR / 2.3 Generator: BART",
+  "method_quote": "DPR follows a bi-encoder architecture",
   "method_original": "DPR follows a bi-encoder architecture",
   "original_abstract_url": "https://arxiv.org/abs/2005.11401v4",
   "original_method_url": "https://arxiv.org/html/2005.11401v4#S2"

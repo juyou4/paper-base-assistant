@@ -7,6 +7,8 @@ from urllib.parse import urlencode
 
 import papers
 import model_support
+from preflight import verify_write
+from table_store import RecordNotFound, _identity
 
 
 ROLES = {
@@ -75,7 +77,7 @@ def _parse(message, table_name):
         parts.append("abstract")
     if re.search(r"方法|技术路线|模型架构|method", message, re.I):
         parts.append("method")
-    literal = re.search(r"(?:把|将)\s*[「“\"](.+?)[」”\"]\s*(?:记录|填|写|放|存|记)", message)
+    literal = re.search(r"(?:把|将)\s*[「『“‘\"'](.+?)[」』”’\"']\s*(?:记录|填|写|放|存|记)", message)
     if literal:
         parts = ["note"]
     if not literal and re.search(r"贡献|实验结果|数据集|指标|作者|年份|机构|结论|怎么搭|怎么做", message):
@@ -103,6 +105,7 @@ class Conversation:
         self.data_dir = data_dir
         self.table_name = table_name
         self.last = None
+        self.last_title = ""
         self.pending = None
         self.lock = threading.RLock()
 
@@ -148,7 +151,7 @@ class Conversation:
                 continue
             kind, field = slot["kind"], slot["field_name"]
             if kind in {"method", "abstract"}:
-                value = (paper.get(kind + "_original") if plan["english"] else
+                value = (papers.english_excerpt(paper.get(kind + "_original", "")) if plan["english"] else
                          paper.get("abstract_zh" if kind == "abstract" else "method"))
                 if not value:
                     if paper.get(kind + "_original") and not plan["english"]:
@@ -172,23 +175,62 @@ class Conversation:
             answer["download_url"] = "/api/pdf?" + urlencode({"paper": paper["url"]})
             answer["message"] = f"已下载原文 PDF（{path.stat().st_size:,} 字节）。"
         if values:
-            write = self.table.upsert(paper["key"], values, plan["request_id"])
-            row = self.table.get(write["record_id"])
+            checks = verify_write(self.table, paper, plan, values)
+            options = {"update_only": True} if plan.get("update_only") else {}
+            try:
+                write = self.table.upsert(paper["key"], values, plan["request_id"], **options)
+                row = self.table.get(write["record_id"])
+            except RecordNotFound:
+                if not plan.get("update_only"):
+                    raise
+                # 飞书可能在更新时才发现记录被删除，下一次选择不能沿用绑定旧行的请求。
+                plan["request_id"] = uuid.uuid4().hex
+                return self._ask(plan, "在当前表可见的记录中未找到这篇论文，没有新增记录。请发另一条已有记录的论文链接或编号。",
+                                 [], "paper")
             if any(row["fields"].get(k) != v for k,v in values.items()):
                 raise ValueError("写入已提交，但当前回读值不一致。请刷新表格核对。")
             action = {"created": "已新增 1 条记录", "updated": "已更新原有记录", "unchanged": "已存在相同内容，未新增记录"}[write["action"]]
             wording = "、".join(values)
             answer.update(message=answer.get("message", "") + f"{action}。已核对「{self.table_name}」中的{wording}。",
-                          verification=f"回读一致 · {len(values)} 个字段 · {row['id']}", row=row, evidence=evidence)
+                          preflight=checks, verification=f"写前核验通过 · 回读一致 · {len(values)} 个字段 · {row['id']}",
+                          row=row, evidence=evidence)
         self.pending = None
         self.last = paper["url"]
+        self.last_title = paper.get("title") or paper["url"]
         return answer
 
     def _load(self, message, plan):
-        paper = papers.resolve_paper(message, self.data_dir,
-                                     need_content=any(s["kind"] in {"method", "abstract"} for s in plan["slots"]))
+        if plan.get("update_only"):
+            # 修改用户指定的单元格只需定位论文，直接使用链接或编号，无需抓取论文内容。
+            arxiv_id, external = papers._find_target(message)
+            url = external or "https://arxiv.org/abs/" + arxiv_id
+            paper = {"key": _identity(url), "url": url, "title": self.last_title if url == self.last else ""}
+        else:
+            paper = papers.resolve_paper(message, self.data_dir,
+                                         need_content=any(s["kind"] in {"method", "abstract"} for s in plan["slots"]))
         plan["paper"] = paper
         return self._commit(plan)
+
+    def _prepare_admin(self, command):
+        from admin_dialog import prepare
+        if command["op"] == "unclear_edit":
+            return self._ask(command, f"你想把整列「{command['target']}」改名为「{command['new_value']}」，"
+                             f"还是只把一篇论文在该列的值改为「{command['new_value']}」？",
+                             ["修改整列的名称", "填写一条记录", "取消"], "edit_target")
+        task = prepare(self.table, command)
+        if "answer" in task:
+            self.pending = None
+            return {"message": task["answer"]}
+        if "ask" in task:
+            task["command"] = command
+            return self._ask(task, task["ask"], task["choices"], "admin_field")
+        return self._ask(task, f"当前连接的数据表为「{self.table_name}」。{task['message']}", ["确认变更", "取消"], "admin_commit")
+
+    def _clarify_intent(self, url, title):
+        if not url:
+            return self._ask({}, "你指的是哪篇论文？请发链接或 arXiv 编号，我会先确认要写的内容。", [], "ambiguous_paper")
+        return self._ask({"url": url}, f"你指的是《{title or url}》吗？要把它的什么内容写进「{self.table_name}」？",
+                         ["保存论文链接", "填写摘要", "填写方法", "换一篇论文", "取消"], "ambiguous_intent")
 
     def respond(self, message, pending_id=None, request_id=None):
         with self.lock:
@@ -200,6 +242,11 @@ class Conversation:
                 if pending_id and pending_id != task["id"]:
                     raise ValueError("上一项确认已经结束，请刷新后重发指令。")
                 stage, plan = task["stage"], task["plan"]
+                if stage == "ambiguous_paper" or (stage == "ambiguous_intent" and REFERENCE.search(message)):
+                    if not REFERENCE.search(message):
+                        return self._ask({}, "请发你指的那篇论文链接或 arXiv 编号。", [], "ambiguous_paper")
+                    source = papers.resolve_paper(message, self.data_dir)
+                    return self._clarify_intent(source["url"], source.get("title"))
                 if stage == "paper":
                     if self.last and re.fullmatch(r"(?:刚才|上一|之前|上面)(?:的)?(?:那|这)?(?:一)?篇(?:论文)?[。！]?", message):
                         return self._load(self.last, plan)
@@ -209,6 +256,28 @@ class Conversation:
                 choice = _clean(message)
                 if choice not in task["choices"]:
                     return self._ask(plan, task["message"], task["choices"], stage)
+                if stage == "edit_target":
+                    if choice == "修改整列的名称":
+                        return self._prepare_admin({"op": "rename", "target": plan["target"], "new_name": plan["new_value"]})
+                    resolved = {"download": False, "english": False, "literal": plan["new_value"], "update_only": True,
+                                "request_id": request_id or uuid.uuid4().hex,
+                                "slots": [{"kind": "note", "hint": plan["target"], "optional": False}]}
+                    return self._ask(resolved, "要修改哪篇论文的这一个单元格？请给论文链接、arXiv 编号，或说“刚才那篇”。",
+                                     [], "paper")
+                if stage == "ambiguous_intent":
+                    if choice == "换一篇论文":
+                        return self._clarify_intent(None, None)
+                    resolved = _parse(choice, self.table_name)
+                    resolved["request_id"] = request_id or uuid.uuid4().hex
+                    return self._load(plan["url"], resolved)
+                if stage in ("admin_field", "admin_commit") and pending_id != task["id"]:
+                    raise ValueError("这项管理操作需要对应的确认，请点击当前对话中的选项。")
+                if stage == "admin_field":
+                    return self._prepare_admin({**plan["command"], "target": plan["candidates"][choice]})
+                if stage == "admin_commit":
+                    from admin_dialog import commit
+                    self.pending = None
+                    return {"message": commit(self.table, plan), "verification": "写前已核验变更对象与原值，写后已回读"}
                 if stage == "schema":
                     f = self.table.add_field(plan["name"], plan["kind"])
                     self.pending = None
@@ -222,8 +291,14 @@ class Conversation:
                 return self._commit(plan)
             if pending_id:
                 raise ValueError("这项确认已结束。请重新发起指令。")
+            if re.match(r"^(?:请问|我想知道|讲讲|告诉我)?\s*(?:如何|怎么才能|怎样|要怎么|能否介绍|怎么把|怎么将)", message):
+                return {"message": "可以先说“查看字段”或“查看角色「论文审阅人」的权限”。需要执行时，请直接指定目标和新值。此处仅说明用法。"}
             if re.search(r"别写|不要|不要改|别存|先别|暂不|不写入|只预览", message):
                 return {"message": "已保留原数据。需要写入时，请发论文链接和目标字段。"}
+            from admin_dialog import parse_admin
+            command = parse_admin(message)
+            if command:
+                return self._prepare_admin(command)
             schema_create = re.fullmatch(r"(?:请|帮我)?(?:新增|新建|创建|添加)\s*(文本|链接|网址|URL)\s*(?:列|字段)\s*[：:]?\s*(.{1,40})", message, re.I)
             if schema_create:
                 name = _clean(schema_create[2])
@@ -234,9 +309,13 @@ class Conversation:
                                  f"将在「{self.table_name}」增加{schema_create[1]}列「{name}」，确认吗？",
                                  ["确认建列", "取消"], "schema")
             if re.search(r"删除|清空|授权|改权限|改名|重命名", message):
-                return {"message": "当前支持新增字段、保存论文和补写记录。此命令未执行。"}
+                return {"message": "请明确要管理的对象。例如“删除字段「临时备注」”或“查看角色「论文审阅人」的权限”。"}
             if len(re.findall(r"https?://", message, re.I)) > 1:
                 return {"message": "这条指令含有多个地址。请一次指定一篇论文。"}
+            if (not REFERENCE.search(message) and re.search(r"那个|这个|刚才的|上面的|也(?:记|加|放|填|存)进去", message)
+                    and re.search(r"记|存|填|写|放|加|录|改", message)
+                    and not re.search(r"标题|题名|摘要|方法|笔记|链接|网址|原文|下载", message)):
+                return self._clarify_intent(self.last, self.last_title)
             try:
                 plan = _parse(message, self.table_name)
             except ValueError:

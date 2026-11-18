@@ -44,6 +44,16 @@ class WorkflowTests(unittest.TestCase):
         self.chat.respond("取消", task["pending_id"])
         self.assertEqual(self.table.rows(), [])
 
+    def test_unclear_intent_confirms_paper_and_content_before_write(self):
+        before = self.save()["row"]
+        request = self.chat.respond("把刚才那个也记进去")
+        self.assertIn("Retrieval-Augmented Generation", request["message"])
+        self.assertIn("填写方法", request["choices"])
+        self.assertEqual(self.table.get(before["id"]), before)
+        result = self.chat.respond("填写方法", request["pending_id"])
+        self.assertEqual(result["row"]["id"], before["id"])
+        self.assertIn("方法概述", result["row"]["fields"])
+
     def test_schema_requires_confirmation_and_real_fields(self):
         q = self.chat.respond("新建文本列 审阅意见")
         self.assertNotIn("审阅意见", [f["name"] for f in self.table.schema()])

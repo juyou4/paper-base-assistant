@@ -34,6 +34,31 @@ class TestPapers(unittest.TestCase):
         self.assertEqual(paper["method_original"], "The test model uses two encoders.")
         self.assertEqual(paper["abstract_zh"], "")
         self.assertEqual(paper["method"], "")
+        self.assertEqual(paper["method_url"], "https://arxiv.org/html/2301.12345")
+
+    def test_inline_math_is_read_once_and_heading_link_comes_from_html(self):
+        abstract = '<meta name="citation_title" content="Example"><blockquote>Abstract:Test abstract.</blockquote>'
+        article = (
+            '<section id="method-3"><h2>Model Architecture</h2>'
+            '<p>Inputs <math alttext="x_{1}"><semantics><msub><mi>x</mi><mn>1</mn></msub>'
+            '<annotation>x_{1}</annotation></semantics></math> have weights '
+            '<math><semantics><mi>w</mi><mo>+</mo><mn>1</mn><annotation>w+1</annotation>'
+            '<annotation-xml><span>duplicate content</span></annotation-xml></semantics></math>.</p>'
+            '<p>Another method paragraph.</p></section><section id="results"><h2>Results</h2></section>'
+        )
+        with tempfile.TemporaryDirectory() as data, patch.object(papers, "_read_html", side_effect=[abstract, article]):
+            paper = papers.resolve_paper("2301.12345", data, True)
+        self.assertEqual(paper["method_original"], "Inputs x_{1} have weights w+1.\nAnother method paragraph.")
+        self.assertEqual(paper["method_quote"], "Inputs x_{1} have weights w+1.")
+        self.assertTrue(paper["method_url"].endswith("#method-3"))
+
+    def test_english_excerpt_ends_at_paragraph_or_sentence(self):
+        original = "We encode subscripts. The decoder uses (x_{1}, ..., x_{m}) tokens.\nMore text."
+        self.assertEqual(papers.english_excerpt(original), original.splitlines()[0])
+        self.assertEqual(papers.english_excerpt(original, 32), "We encode subscripts.")
+        self.assertEqual(papers.english_excerpt("Refer to Fig. 1 for the equation. More results.", 18),
+                         "Refer to Fig. 1 for the equation.")
+        self.assertEqual(papers.english_excerpt("An unpunctuated math fragment", 10), "An unpunctuated math fragment")
 
     def test_external_link_is_saved_without_fetch(self):
         with tempfile.TemporaryDirectory() as data, patch.object(papers, "_open", side_effect=AssertionError):

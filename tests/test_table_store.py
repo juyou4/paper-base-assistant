@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 from table_store import FeishuTable, LarkCliTable, LocalTable, TableError, RecordNotFound
 from tools.feishu_setup import resolve_target, save_target
@@ -155,6 +156,50 @@ class FeishuTableTests(unittest.TestCase):
         with patch("table_store.urlopen", side_effect=replies), self.assertRaisesRegex(TableError, "1254041"):
             self.table.schema()
 
+    def test_cli_read_retries_network_exit_and_server_wait_but_never_writes_or_permissions(self):
+        cli = LarkCliTable(":memory:", sys.executable, "base", "tbl")
+        self.addCleanup(cli.close)
+        network = SimpleNamespace(returncode=4, stdout=b"", stderr=b"")
+        limited = SimpleNamespace(returncode=1, stdout=b"",
+            stderr=b'{"ok":false,"error":{"type":"api","subtype":"rate_limit","retryable":true,"retry_after_seconds":2}}')
+        success = SimpleNamespace(returncode=0, stdout=b'{"ok":true,"data":{"items":[]}}', stderr=b"")
+        with patch("table_store.subprocess.run", side_effect=[network, limited, success]) as run, patch("table_store.time.sleep") as sleep:
+            self.assertEqual(cli._request("GET", "/fields")["data"]["items"], [])
+            self.assertEqual(run.call_count, 3)
+            self.assertEqual(sleep.call_args_list[-1].args, (2,))
+        denied = SimpleNamespace(returncode=3, stdout=b"", stderr=b'{"ok":false,"error":{"type":"authorization","code":91403}}')
+        protocol = SimpleNamespace(returncode=4, stdout=b"", stderr=b'{"ok":false,"error":{"type":"network","subtype":"protocol"}}')
+        for method, failure in (("GET", denied), ("GET", protocol), ("POST", network), ("PUT", limited)):
+            with self.subTest(method=method, failure=failure), patch("table_store.subprocess.run", return_value=failure) as run:
+                with patch("table_store.time.sleep") as sleep, self.assertRaises(TableError):
+                    cli._request(method, "/records")
+                self.assertEqual(run.call_count, 1)
+                sleep.assert_not_called()
+        with patch("table_store.subprocess.run", return_value=network) as run, patch("table_store.time.sleep"):
+            with self.assertRaisesRegex(TableError, "尝试 3 次"):
+                cli._request("HEAD", "/fields")
+            self.assertEqual(run.call_count, 3)
+
+    def test_http_read_backoff_headers_and_long_wait(self):
+        def throttled(seconds):
+            return HTTPError("https://unused.invalid", 429, "Too Many Requests",
+                {"Retry-After": "1", "x-ogw-ratelimit-reset": str(seconds)}, io.BytesIO(b'{"code":99991400}'))
+        with patch("table_store.urlopen", side_effect=[throttled(2), io.BytesIO(b'{"code":0,"data":{}}')]) as send:
+            with patch("table_store.time.sleep") as sleep:
+                self.assertEqual(self.table._request("GET", "/fields", authenticated=False)["code"], 0)
+                sleep.assert_called_once_with(2)
+            self.assertEqual(send.call_count, 2)
+        with patch("table_store.urlopen", side_effect=throttled(60)) as send, patch("table_store.time.sleep") as sleep:
+            with self.assertRaisesRegex(TableError, "至少等待 60 秒"):
+                self.table._request("GET", "/fields", authenticated=False)
+            sleep.assert_not_called()
+            self.assertEqual(send.call_count, 1)
+        with patch("table_store.urlopen", side_effect=URLError("timeout")) as send, patch("table_store.time.sleep") as sleep:
+            with self.assertRaisesRegex(TableError, "没有自动重发"):
+                self.table._request("POST", "/fields", authenticated=False)
+            sleep.assert_not_called()
+            self.assertEqual(send.call_count, 1)
+
     def test_permission_denial_explains_operation_and_hides_target(self):
         cli = LarkCliTable(":memory:", sys.executable, "privateBaseToken", "tblX")
         self.addCleanup(cli.close)
@@ -211,6 +256,34 @@ class FeishuTableTests(unittest.TestCase):
             self.assertEqual(self.table.get(changed["record_id"])["fields"],
                              {"论文链接": LINK, "方法概述": "摘要以外的内容"})
             self.assertEqual(len(self.remote.records), 1)
+
+    def test_update_only_does_not_recover_an_unseen_pending_create(self):
+        self.remote.drop_create_response = True
+        self.remote.hide_rows = True
+        with patch.object(self.table, "_request", side_effect=self.remote) as send:
+            with self.assertRaises(TableError):
+                self.table.upsert(KEY, {"论文链接": LINK}, "pending")
+            send.reset_mock()
+            with self.assertRaises(RecordNotFound):
+                self.table.upsert(KEY, {"方法概述": "需复现"}, "edit", update_only=True)
+            self.assertTrue(all(call.args[0] == "GET" for call in send.call_args_list))
+            self.remote.hide_rows = False
+            change = self.table.upsert(KEY, {"方法概述": "需复现"}, "edit", update_only=True)
+        self.assertEqual(change, {"action": "updated", "record_id": "rec1"})
+        self.assertEqual(len(self.remote.posts), 1)
+
+    def test_update_only_binds_remote_id_if_deleted_while_updating(self):
+        self.remote.records["original"] = {"论文链接": {"link": LINK}}
+        def delete_before_put(method, path, body=None, query=None):
+            if method == "PUT":
+                del self.remote.records["original"]
+            return self.remote(method, path, body, query)
+        with patch.object(self.table, "_request", side_effect=delete_before_put) as send:
+            with self.assertRaises(RecordNotFound):
+                self.table.upsert(KEY, {"方法概述": "需复现"}, "edit", update_only=True)
+            mutations = [(c.args[0], c.args[1].split("/")[-1]) for c in send.call_args_list if c.args[0] != "GET"]
+            self.assertEqual(mutations, [("PUT", "original")])
+        self.assertEqual(self.remote.records, {})
 
     def test_nonstandard_link_fields_and_ambiguous_rows(self):
         self.remote.columns.extend([{"field_id": "src", "field_name": "出处", "type": 15},

@@ -9,7 +9,7 @@ import time
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import pdf_sections
@@ -64,9 +64,27 @@ class _PageText(HTMLParser):
         self.acl_abstract = ""
         self._acl_depth = 0
         self._in_abstract = False
+        self._math_depth = 0
+        self._annotation_depth = 0
+        self._math_alt = ""
+        self._math_text = []
+        self._sections = []
+        self.heading_anchors = {}
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
+        if tag == "math":
+            if not self._math_depth:
+                self._math_alt = (attrs.get("alttext") or "").strip()
+                self._math_text = []
+            self._math_depth += 1
+            return
+        if self._math_depth:
+            if tag in ("annotation", "annotation-xml"):
+                self._annotation_depth += 1
+            return
+        if tag == "section":
+            self._sections.append(attrs.get("id", ""))
         if tag == "div" and (self._acl_depth or "acl-abstract" in attrs.get("class", "").split()):
             self._acl_depth += 1
         if self._acl_depth and tag == "span":
@@ -76,8 +94,23 @@ class _PageText(HTMLParser):
         if re.fullmatch(r"h[1-6]", tag) or tag in ("p", "blockquote"):
             self.tag = tag
             self.parts = []
+            if tag.startswith("h"):
+                anchor = attrs.get("id") or (self._sections[-1] if self._sections else "")
+                if anchor:
+                    self.heading_anchors[len(self.blocks)] = anchor
 
     def handle_endtag(self, tag):
+        if self._math_depth:
+            if tag in ("annotation", "annotation-xml") and self._annotation_depth:
+                self._annotation_depth -= 1
+            if tag == "math":
+                self._math_depth -= 1
+                if not self._math_depth:
+                    self.handle_data(self._math_alt or "".join(self._math_text).strip())
+                    self._annotation_depth = 0
+            return
+        if tag == "section" and self._sections:
+            self._sections.pop()
         if tag == "div" and self._acl_depth:
             self._acl_depth -= 1
             if not self._acl_depth:
@@ -88,10 +121,32 @@ class _PageText(HTMLParser):
             self.parts = []
 
     def handle_data(self, data):
+        if self._math_depth:
+            if not self._math_alt and not self._annotation_depth:
+                self._math_text.append(data)
+            return
         if self.tag:
             self.parts.append(data)
         if self._in_abstract:
             self.acl_abstract += data
+
+
+def english_excerpt(original, max_chars=650):
+    """优先取完整首段；长段落在自然句界处结束，限长是软目标。"""
+    if not original:
+        return ""
+    first = next((line.strip() for line in original.splitlines() if line.strip()), "")
+    if len(first) <= max_chars:
+        return first
+    last_end = 0
+    for match in re.finditer(r"""[.!?]["'”’)\]]*(?=\s|$)""", first):
+        prefix = first[:match.end()]
+        if re.search(r"\b(?:e\.g|i\.e|et al|fig|eq|sec|dr|mr|ms|vs)\.$", prefix, re.I):
+            continue
+        if match.end() > max_chars:
+            return first[:last_end or match.end()]
+        last_end = match.end()
+    return first[:last_end] if last_end else first
 
 
 def _method_evidence(page):
@@ -110,8 +165,8 @@ def _method_evidence(page):
             if sum(map(len, paragraphs)) >= 3000:
                 break
         if paragraphs:
-            return heading, "\n".join(paragraphs)[:4000]
-    return "", ""
+            return heading, "\n".join(paragraphs), page.heading_anchors.get(index, "")
+    return "", "", ""
 
 
 def _find_target(text):
@@ -191,7 +246,7 @@ def _pdf_evidence(paper, data_dir):
     for key, item in found.items():
         if not paper[key + "_original"]:
             paper[key + "_original"] = item["text"]
-            paper[key + "_quote"] = item["text"][:200]
+            paper[key + "_quote"] = english_excerpt(item["text"], 200)
             paper[key + "_source"] = f"原文 PDF 第 {item['page']} 页 · {item['section']}"
             paper[key + "_url"] = paper["pdf_url"] + "#page=" + str(item["page"])
 
@@ -211,7 +266,7 @@ def _acl_paper(url, data_dir, need_content):
         para = " ".join(head.acl_abstract.split())
         if para:
             paper.update(abstract_original=para, abstract_source="ACL Anthology 作者摘要",
-                         abstract_quote=para[:200], abstract_url=paper["url"])
+                         abstract_quote=english_excerpt(para, 200), abstract_url=paper["url"])
     except HTTPError as exc:
         if exc.code in (404, 410):
             raise ValueError("ACL Anthology 未找到这篇论文。") from exc
@@ -246,7 +301,7 @@ def resolve_paper(text_or_url, data_dir, need_content=False):
             abstract = next((body for tag, body in head.blocks if tag == "blockquote"), "")
             abstract = re.sub(r"^Abstract\s*:\s*", "", abstract).strip() or head.meta.get("og:description", "")
             if abstract:
-                result.update(abstract_original=abstract, abstract_quote=abstract[:220],
+                result.update(abstract_original=abstract, abstract_quote=english_excerpt(abstract, 220),
                               abstract_source="arXiv 作者摘要", abstract_url=url)
                 if re.search(r"[\u4e00-\u9fff]{4}", abstract):
                     result["abstract_zh"] = abstract
@@ -260,10 +315,11 @@ def resolve_paper(text_or_url, data_dir, need_content=False):
             try:
                 article = _PageText()
                 article.feed(_read_html(html_url, 5 * 1024 * 1024))
-                heading, body = _method_evidence(article)
+                heading, body, anchor = _method_evidence(article)
                 if body:
-                    result.update(method_original=body, method_quote=body[:220],
-                                  method_source=heading + " · arXiv HTML 正文", method_url=html_url)
+                    method_url = html_url + "#" + quote(anchor, safe="") if anchor else html_url
+                    result.update(method_original=body, method_quote=english_excerpt(body, 220),
+                                  method_source=heading + " · arXiv HTML 正文", method_url=method_url)
                     if re.search(r"[\u4e00-\u9fff]{4}", body):
                         result["method"] = body.split("。")[0] + "。"
             except (OSError, ValueError):
