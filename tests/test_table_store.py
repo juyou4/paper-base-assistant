@@ -155,6 +155,28 @@ class FeishuTableTests(unittest.TestCase):
         with patch("table_store.urlopen", side_effect=replies), self.assertRaisesRegex(TableError, "1254041"):
             self.table.schema()
 
+    def test_permission_denial_explains_operation_and_hides_target(self):
+        cli = LarkCliTable(":memory:", sys.executable, "privateBaseToken", "tblX")
+        self.addCleanup(cli.close)
+        checks = [("GET", "/fields", "可见范围"), ("POST", "/fields", "字段管理权限"),
+                  ("POST", "/records", "新增记录"), ("PUT", "/records/rec1", "更新记录")]
+        for code in (91403, 1254302):
+            for method, suffix, expected in checks:
+                path = "/bitable/v1/apps/privateBaseToken/tables/tblX" + suffix
+                with self.subTest(code=code, method=method, suffix=suffix):
+                    raw = io.BytesIO(json.dumps({"code": code, "msg": "forbidden"}).encode())
+                    with patch("table_store.urlopen", return_value=raw), self.assertRaises(TableError) as app_exc:
+                        self.table._request(method, path, authenticated=False)
+                    err = json.dumps({"ok": False, "error": {"code": code, "message": "privateBaseToken"}}).encode()
+                    failed = SimpleNamespace(returncode=1, stdout=b"", stderr=err)
+                    with patch("table_store.subprocess.run", return_value=failed), self.assertRaises(TableError) as cli_exc:
+                        cli._request(method, path)
+                    for error, who in ((app_exc.exception, "当前应用"), (cli_exc.exception, "当前登录用户")):
+                        self.assertIn(str(code), str(error))
+                        self.assertIn(expected, str(error))
+                        self.assertIn(who, str(error))
+                        self.assertNotIn("privateBaseToken", str(error))
+
     def test_new_request_after_lost_ack_recovers_persistent_create(self):
         self.remote.drop_create_response = True
         self.remote.hide_rows = True

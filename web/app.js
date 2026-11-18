@@ -76,6 +76,13 @@ function cellValue(value) {
   return String(value);
 }
 
+function hasCellValue(value) {
+  if (value == null) return false;
+  if (Array.isArray(value)) return value.some(hasCellValue);
+  if (typeof value === "object") return Object.values(value).some(hasCellValue);
+  return String(value).trim().length > 0;
+}
+
 function renderValue(container, field, value) {
   const content = cellValue(value);
   const url = field.type === "url" && /^https?:\/\//i.test(content) ? safeLink(content) : null;
@@ -100,7 +107,11 @@ function renderState() {
   mode.className = "mode connected";
   mode.lastElementChild.textContent = state.mode === "feishu" ? "飞书多维表格" : "本地演示 · SQLite";
   byId("records-heading").textContent = state.table_name || "阅读清单";
-  byId("row-count").textContent = state.rows.length + " 条记录";
+  const populatedRows = state.rows.filter(row => Object.values(row.fields || {}).some(hasCellValue));
+  const blankCount = state.rows.length - populatedRows.length;
+  byId("row-count").textContent = blankCount
+    ? populatedRows.length + " 条有内容记录 · " + blankCount + " 条空白行"
+    : state.rows.length + " 条记录";
   byId("field-count").textContent = state.fields.length + " 个字段";
   byId("sample").hidden = !state.sample.title;
   byId("sample-title").textContent = state.sample.title || "";
@@ -117,7 +128,7 @@ function renderState() {
     headers.append(th);
   });
   const body = table.createTBody();
-  state.rows.forEach((row, index) => {
+  populatedRows.forEach((row, index) => {
     const tr = body.insertRow();
     if (row.id === selectedId) tr.className = "selected";
     const btn = make("button", String(index + 1));
@@ -129,8 +140,10 @@ function renderState() {
     tr.insertCell().append(btn);
     for (const field of state.fields) renderValue(tr.insertCell(), field, row.fields[field.name]);
   });
-  byId("empty-sheet").hidden = Boolean(state.rows.length);
-  byId("empty-sheet").textContent = "暂无记录。存入论文后，结果会出现在这里。";
+  byId("empty-sheet").hidden = Boolean(populatedRows.length);
+  byId("empty-sheet").textContent = blankCount
+    ? "当前显示有内容的记录。存入论文后，结果会出现在这里。"
+    : "暂无记录。存入论文后，结果会出现在这里。";
 }
 
 async function refreshState() {

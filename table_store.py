@@ -23,6 +23,17 @@ class RecordNotFound(TableError):
     """飞书确认指定记录已不存在。"""
 
 
+def _permission_hint(method, path, identity):
+    if method == "POST" and path.endswith("/fields"):
+        return (f"新增字段需要接口授权，也需要目标文档允许{identity}管理这张数据表的字段。"
+                "请在飞书检查文档协作权限；已启用高级权限时，再核对该数据表的字段管理权限。")
+    if "/records" in path and method in {"POST", "PUT", "PATCH"} and not path.endswith(("/search", "/batch_get")):
+        action = "新增记录" if method == "POST" and path.endswith("/records") else "更新记录"
+        return (f"请检查{action}的接口授权和目标文档对{identity}的编辑权限。"
+                "已启用高级权限时，还需核对目标行和字段是否允许此次写入。")
+    return f"请检查读取接口的授权，以及{identity}对目标文档、数据表和所读字段的可见范围。"
+
+
 _INITIAL_COLUMNS = (
     ("title", "论文标题", "text"), ("link", "论文链接", "url"),
     ("abstract", "中文摘要", "text"), ("method", "方法概述", "text"),
@@ -265,6 +276,9 @@ class FeishuTable:
         if code == 1254043 or (status == 404 and code in {None, 404} and "/records/" in path):
             raise RecordNotFound("飞书数据表中已找不到该条记录。")
         if status >= 400 or code != 0:
+            if str(code) in {"91403", "1254302"}:
+                hint = _permission_hint(method, path, "当前应用")
+                raise TableError(f"飞书拒绝了本次操作（HTTP {status}，业务码 {code}）。{hint}")
             raise TableError(f"飞书请求失败（HTTP {status}，业务码 {code}）。请检查应用权限、目标表权限及字段设置。")
         return answer
 
@@ -472,6 +486,9 @@ class LarkCliTable(FeishuTable):
             code = err.get("code") if isinstance(err, dict) else None
             if code == 1254043:
                 raise RecordNotFound("飞书数据表中已找不到该条记录。")
+            if str(code) in {"91403", "1254302"}:
+                hint = _permission_hint(method, path, "当前登录用户")
+                raise TableError(f"飞书 CLI 拒绝了本次操作（退出码 {result.returncode}，业务码 {code}）。{hint}")
             code_text = f"，业务码 {code}" if isinstance(code, int) else ""
             raise TableError(f"飞书 CLI 请求失败（退出码 {result.returncode}{code_text}）。请检查用户登录、表格权限和 CLI 版本。")
         if not isinstance(answer.get("data"), dict):
