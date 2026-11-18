@@ -14,10 +14,11 @@ _FIELD_NAMES = {
     "metric": ("关键数据", "实验指标", "关键指标", "实验结果", "指标", "阅读笔记"),
     "figure": ("论文图", "关键图", "图表", "关键图表", "图表摘录", "研究笔记"),
     "table": ("论文表格", "数据表格", "图表", "关键图表", "图表摘录", "研究笔记"),
+    "formula": ("论文公式", "关键公式", "公式", "研究笔记", "阅读笔记"),
     "title": ("论文标题", "文献标题", "论文名称", "标题", "题名", "title"),
     "url": ("论文链接", "论文地址", "原文链接", "原文地址", "文献链接", "预印本链接", "URL"),
 }
-_KIND_NAMES = {"metric": "指标", "figure": "图", "table": "表"}
+_KIND_NAMES = {"metric": "指标", "figure": "图", "table": "表", "formula": "公式"}
 MAX_PAPERS = 8
 
 
@@ -50,11 +51,25 @@ def _blocks(items):
     """为每列生成可单独比较的证据段，重复提取不追加同一段。"""
     fields = defaultdict(list)
     for item in items:
-        lines = [f"【{_KIND_NAMES[item['kind']]}】{item['label']} · {item['value']}"]
+        is_math = item["kind"] == "formula"
+        label = f"【{_KIND_NAMES[item['kind']]}】{item['label']}"
+        if is_math:
+            lines = [label, "$$", item["latex"], "$$"]
+        else:
+            lines = [f"{label} · {item['value']}"]
         for row in [item.get("headers", [])] + (item.get("rows") or []):
             if row:
                 lines.append(" | ".join(str(cell) for cell in row))
-        lines.extend([f"原文摘录：{item['quote']}", f"出处：{item['source']}  {item['source_url']}"])
+        original = item["quote"].strip()
+        # 分栏排版的等式需要补齐对齐环境，保留合并前的原文以便复核。
+        same_math = is_math and (original == item["latex"] or any(
+            original.startswith(left) and original.endswith(right)
+            and original[len(left):-len(right)].strip() == item["latex"]
+            for left, right in (("$$", "$$"), ("$", "$"), (r"\[", r"\]"), (r"\(", r"\)"))
+        ))
+        if not same_math:
+            lines.append(f"原文摘录：{item['quote']}")
+        lines.append(f"出处：{item['source']}  {item['source_url']}")
         if item.get("image_url"):
             lines.append("原图：" + item["image_url"])
         block = "\n".join(lines)
@@ -135,9 +150,9 @@ def prepare(table, urls, kinds=None):
 
     if not urls or len(urls) > MAX_PAPERS:
         raise ValueError(f"请指定 1 至 {MAX_PAPERS} 篇论文。")
-    wanted = set(_KIND_NAMES if kinds is None else kinds)
+    wanted = {"metric", "figure", "table"} if kinds is None else set(kinds)
     if not wanted or not wanted <= _KIND_NAMES.keys():
-        raise ValueError("请指定关键数据、图或表。")
+        raise ValueError("请指定关键数据、图、表或公式。")
     tool = getattr(table, "tool_name", None)
     with step("读取回填目标字段和现有记录", tool=tool):
         schema, rows = table.schema(), table.rows()
@@ -152,16 +167,26 @@ def prepare(table, urls, kinds=None):
                 raise ValueError("本批次中已出现同一篇论文。")
             seen.add(key)
             with step(f"提取第 {len(entries)} 篇论文的原文证据", tool="论文解析"):
-                paper = extract_evidence(requested)
+                paper = (extract_evidence(requested, include_formulas=True) if "formula" in wanted
+                         else extract_evidence(requested))
                 if not _same_source(requested, paper["url"]):
                     raise ValueError("论文来源与请求的链接或版本不一致。")
                 entry.update(title=paper["title"], url=paper["url"])
                 if not entry["title"]:
                     raise ValueError("论文缺少可核验的标题。")
                 entry["items"] = [dict(item) for item in paper["items"] if item["kind"] in wanted]
+                if "formula" in wanted and not any(item["kind"] == "formula" for item in entry["items"]):
+                    note = "未取得可核对的公式源码。可打开论文原页核对，扫描页公式需要数学 OCR。"
+                    if not entry["items"]:
+                        raise ValueError(note)
+                    entry["notice"] = note
                 if not entry["items"]:
                     raise ValueError("论文中未取得该类型的可定位原文证据。")
                 for item in entry["items"]:
+                    if item["kind"] == "formula" and not (
+                        isinstance(item.get("latex"), str) and item["latex"].strip()
+                    ):
+                        raise ValueError("缺少可核对的公式源码，请查看原文。")
                     if (not all(isinstance(item.get(k), str) and item[k].strip()
                                 for k in ("label", "value", "source", "quote", "source_url"))
                             or not _same_source(entry["url"], item["source_url"])):
@@ -175,7 +200,7 @@ def prepare(table, urls, kinds=None):
     ready = sum(draft is not None for draft in drafts)
     plan = {"ready": ready, "entries": entries, "drafts": drafts}
     message = (f"已处理 {len(entries)} 篇，{ready} 篇可回填。"
-               + ("请核对每项原文、数值和目标列，再确认回填。" if ready else "请查看逐篇原因后重新提取。"))
+               + ("请核对原文、提取内容和目标列，再确认回填。" if ready else "请查看逐篇原因后重新提取。"))
     return plan, {"message": message, "evidence_preview": entries}
 
 

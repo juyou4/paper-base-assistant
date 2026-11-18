@@ -44,12 +44,15 @@ class TestPapers(unittest.TestCase):
             '<annotation>x_{1}</annotation></semantics></math> have weights '
             '<math><semantics><mi>w</mi><mo>+</mo><mn>1</mn><annotation>w+1</annotation>'
             '<annotation-xml><span>duplicate content</span></annotation-xml></semantics></math>.</p>'
-            '<p>Another method paragraph.</p></section><section id="results"><h2>Results</h2></section>'
+            r'<p>Variance <math><semantics><msup><mi>s</mi><mn>2</mn></msup>'
+            r'<annotation encoding="application/x-tex">\sigma^2</annotation></semantics></math>.</p>'
+            '</section><section id="results"><h2>Results</h2></section>'
         )
         with tempfile.TemporaryDirectory() as data, patch.object(papers, "_read_html", side_effect=[abstract, article]):
             paper = papers.resolve_paper("2301.12345", data, True)
-        self.assertEqual(paper["method_original"], "Inputs x_{1} have weights w+1.\nAnother method paragraph.")
-        self.assertEqual(paper["method_quote"], "Inputs x_{1} have weights w+1.")
+        first_line = r"Inputs \(x_{1}\) have weights w+1."
+        self.assertEqual(paper["method_original"], first_line + "\n" + r"Variance \(\sigma^2\).")
+        self.assertEqual(paper["method_quote"], first_line)
         self.assertTrue(paper["method_url"].endswith("#method-3"))
 
     def test_english_excerpt_ends_at_paragraph_or_sentence(self):

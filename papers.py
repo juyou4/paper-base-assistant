@@ -13,6 +13,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import pdf_sections
+from math_evidence import MathNode
 
 
 SAMPLE = json.loads((Path(__file__).parent / "assets" / "sample_paper.json").read_text(encoding="utf-8"))
@@ -64,24 +65,17 @@ class _PageText(HTMLParser):
         self.acl_abstract = ""
         self._acl_depth = 0
         self._in_abstract = False
-        self._math_depth = 0
-        self._annotation_depth = 0
-        self._math_alt = ""
-        self._math_text = []
+        self._math = None
         self._sections = []
         self.heading_anchors = {}
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
-        if tag == "math":
-            if not self._math_depth:
-                self._math_alt = (attrs.get("alttext") or "").strip()
-                self._math_text = []
-            self._math_depth += 1
+        if self._math is not None:
+            self._math.start(tag, attrs)
             return
-        if self._math_depth:
-            if tag in ("annotation", "annotation-xml"):
-                self._annotation_depth += 1
+        if tag == "math":
+            self._math = MathNode(attrs)
             return
         if tag == "section":
             self._sections.append(attrs.get("id", ""))
@@ -100,14 +94,13 @@ class _PageText(HTMLParser):
                     self.heading_anchors[len(self.blocks)] = anchor
 
     def handle_endtag(self, tag):
-        if self._math_depth:
-            if tag in ("annotation", "annotation-xml") and self._annotation_depth:
-                self._annotation_depth -= 1
+        if self._math is not None:
             if tag == "math":
-                self._math_depth -= 1
-                if not self._math_depth:
-                    self.handle_data(self._math_alt or "".join(self._math_text).strip())
-                    self._annotation_depth = 0
+                marked = self._math.marked_text()
+                self._math = None
+                self.handle_data(marked)
+            else:
+                self._math.end(tag)
             return
         if tag == "section" and self._sections:
             self._sections.pop()
@@ -121,9 +114,8 @@ class _PageText(HTMLParser):
             self.parts = []
 
     def handle_data(self, data):
-        if self._math_depth:
-            if not self._math_alt and not self._annotation_depth:
-                self._math_text.append(data)
+        if self._math is not None:
+            self._math.text(data)
             return
         if self.tag:
             self.parts.append(data)

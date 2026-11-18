@@ -2007,6 +2007,51 @@ dialog::backdrop {
   font-variant-numeric: tabular-nums;
 }
 .review-table-scroll th { font-weight: 650; }
+.paper-rich, .review-quote blockquote.paper-rich, .detail-row dd.paper-rich {
+  min-width: 0;
+  max-inline-size: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.paper-rich > :first-child { margin-block-start: 0; }
+.paper-rich > :last-child { margin-block-end: 0; }
+.paper-rich :where(p, ul, ol, pre, blockquote, table) { margin-block: .45em; }
+.paper-rich :where(ul, ol) { padding-inline-start: 1.5em; }
+.paper-rich :where(h1, h2, h3, h4, h5, h6) { font-size: 1em; margin: .65em 0 .2em; }
+.paper-rich > table { display: block; overflow-x: auto; width: fit-content; max-width: 100%; }
+.paper-rich td, .paper-rich th { padding: .25em .6em; }
+.paper-rich a { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
+.paper-rich code, .formula-source pre { font: .93em/1.55 var(--font-mono); }
+.paper-rich :not(pre) > code {
+  padding: .08em .25em;
+  border-radius: 4px;
+  background: var(--pill);
+}
+.paper-rich pre, .formula-source pre {
+  max-width: 100%;
+  overflow-x: auto;
+  padding: .65em .8em;
+  margin: .4em 0;
+  border-radius: 8px;
+  background: var(--tray);
+  color: var(--ink-secondary);
+  white-space: pre;
+}
+.math-block, .formula-preview {
+  display: block;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+}
+.math-block { padding-block: .18em; }
+.paper-rich .katex-display { width: max-content; min-width: 100%; margin: .35em 0; }
+.formula-preview { margin: .55em 0; color: var(--ink); font-size: .95rem; }
+.formula-preview > .math-inline { display: inline-block; padding: 3px 0; }
+.math-source-fallback { white-space: pre-wrap; overflow-wrap: anywhere; }
+.formula-copy { margin-inline-start: auto; }
+.sheet-cell-content { max-height: 4.5em; overflow: hidden; }
 .review-error { color: var(--danger); font-size: 13px; }
 .review-footer {
   display: flex;

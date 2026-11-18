@@ -531,7 +531,7 @@ function renderValue(container, field, value) {
   const content = cellValue(value);
   const url = field.type === "url" && /^https?:\/\//i.test(content) ? safeLink(content) : null;
   if (url) container.append(link(content, url));
-  else container.textContent = content || "—";
+  else PaperRichText.render(container, content || "—");
   if (content) container.title = content;
 }
 
@@ -652,7 +652,7 @@ function renderCardsView(populatedRows) {
       extraFields.forEach(field => {
         const box = make("div", undefined, "paper-field-box");
         box.append(make("span", field.name, "paper-field-name"));
-        const val = make("div", cellValue(row.fields[field.name]), "paper-field-val");
+        const val = PaperRichText.render(make("div", undefined, "paper-field-val"), cellValue(row.fields[field.name]));
         val.title = cellValue(row.fields[field.name]);
         box.append(val);
         grid.append(box);
@@ -660,9 +660,11 @@ function renderCardsView(populatedRows) {
       card.append(grid);
     }
 
-    card.addEventListener("click", () => showDetail(row));
+    card.addEventListener("click", e => {
+      if (!e.target.closest("a,button")) showDetail(row);
+    });
     card.addEventListener("keydown", e => {
-      if (e.key === "Enter" || e.key === " ") {
+      if (e.target === card && (e.key === "Enter" || e.key === " ")) {
         e.preventDefault();
         showDetail(row);
       }
@@ -690,7 +692,11 @@ function renderTableView(populatedRows) {
     btn.setAttribute("aria-label", "查看第 " + (index + 1) + " 条记录");
     btn.addEventListener("click", () => showDetail(row));
     tr.insertCell().append(btn);
-    for (const field of state.fields) renderValue(tr.insertCell(), field, row.fields[field.name]);
+    for (const field of state.fields) {
+      const content = make("div", undefined, "sheet-cell-content");
+      renderValue(content, field, row.fields[field.name]);
+      tr.insertCell().append(content);
+    }
   });
 }
 
@@ -914,7 +920,7 @@ function showEvidence(items) {
       top.append(make("span", item.field, "evidence-tag"));
       block.append(top);
     }
-    if (item.quote) block.append(make("blockquote", item.quote));
+    if (item.quote) block.append(PaperRichText.render(make("blockquote"), item.quote));
     if (item.source) {
       const source = make("small", undefined, "evidence-source");
       const sourceUrl = item.url || item.source;
@@ -927,7 +933,7 @@ function showEvidence(items) {
   });
 }
 
-// 论文预览只连接到提取器支持的原文站点。原文和表格单元格都作为纯文本显示。
+// 原文引用和原图使用提取器支持的站点。
 function paperSourceLink(address) {
   try {
     const url = new URL(address);
@@ -940,7 +946,7 @@ function paperSourceLink(address) {
   }
 }
 
-const evidenceKinds = { metric: "关键数据", figure: "图", table: "表" };
+const evidenceKinds = { metric: "关键数据", figure: "图", table: "表", formula: "公式" };
 
 function reviewItem(item, paperUrl) {
   const block = make("section", undefined, "review-item");
@@ -949,8 +955,20 @@ function reviewItem(item, paperUrl) {
   const meta = make("div", undefined, "review-meta");
   meta.append(make("span", kind, "evidence-tag"));
   if (item.field) meta.append(make("span", "回填至「" + item.field + "」"));
-  block.append(meta, make("h4", item.label));
-  if (item.value && item.value !== item.label) block.append(make("p", item.value, "review-value"));
+  block.append(meta, PaperRichText.render(make("h4"), item.label, true));
+  const latex = item.kind === "formula" && (item.latex || item.value);
+  if (latex) {
+    const copy = make("button", undefined, "mini-copy-btn formula-copy");
+    copy.type = "button";
+    copy.innerHTML = ICONS.copy + '<span class="copy-txt">复制 LaTeX</span>';
+    copy.addEventListener("click", () => copyWithFeedback(copy, latex, "复制 LaTeX"));
+    meta.append(copy);
+    const raw = make("details", undefined, "review-quote formula-source");
+    raw.append(make("summary", "查看 LaTeX 原文"), make("pre", latex));
+    block.append(PaperRichText.formula(make("div"), latex, item.display !== false), raw);
+  } else if (item.value && item.value !== item.label) {
+    block.append(PaperRichText.render(make("div", undefined, "review-value"), item.value));
+  }
 
   if (Array.isArray(item.rows) && item.rows.length) {
     const frame = make("div", undefined, "review-table-scroll");
@@ -960,13 +978,13 @@ function reviewItem(item, paperUrl) {
     const table = make("table");
     if (Array.isArray(item.headers) && item.headers.length) {
       const head = table.createTHead().insertRow();
-      for (const value of item.headers) head.append(make("th", value));
+      for (const value of item.headers) head.append(PaperRichText.render(make("th"), value, true));
     }
     const body = table.createTBody();
     for (const values of item.rows) {
       if (!Array.isArray(values)) continue;
       const row = body.insertRow();
-      for (const value of values) row.insertCell().textContent = value;
+      for (const value of values) PaperRichText.render(row.insertCell(), value, true);
     }
     frame.append(table);
     block.append(frame);
@@ -985,7 +1003,7 @@ function reviewItem(item, paperUrl) {
   }
   if (item.quote && item.quote !== item.value) {
     const quote = make("details", undefined, "review-quote");
-    quote.append(make("summary", "查看原文摘录"), make("blockquote", item.quote));
+    quote.append(make("summary", "查看原文摘录"), PaperRichText.render(make("blockquote"), item.quote));
     block.append(quote);
   }
   const sourceUrl = paperSourceLink(item.source_url) || paperSourceLink(item.source) || paperUrl;
@@ -1018,6 +1036,7 @@ function openEvidenceReview(preview) {
       ? [items.length + " 项", action].filter(Boolean).join(" · ") : "跳过本篇", "review-paper-meta"));
     if (paperUrl) section.append(link("打开论文 ↗", paperUrl, "review-source"));
     if (paper.error) section.append(make("p", paper.error, "review-error"));
+    if (paper.notice) section.append(make("p", paper.notice, "review-mapping"));
     if (paper.fields?.length) {
       const modes = { set: "填入", append: "追加", unchanged: "保留原值" };
       const mapping = paper.fields.map(field => (modes[field.mode] || "填入") + "「" + field.name + "」");

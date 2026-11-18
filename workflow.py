@@ -37,8 +37,11 @@ EVIDENCE_TERMS = {
                          r"图\s*\d+|(?:些|张|看|的|和|与|跟|及|、|只要|只看|摘出|提取|只留)图|图(?=[和跟与及、/表，。！？\s]|$)|\bfig(?:ures?)?\b", re.I),
     "table": re.compile(r"图表|表格|结果表|实验表|对比表|数据表|原表|表\s*\d+|"
                         r"(?:哪些|几[张个]|的|只要|只看|提取|和|跟|与|及|、|/)表(?=[里中和与，。！？\s]|$)|\btables?\b", re.I),
+    "formula": re.compile(r"公式|方程|数学表达式|损失函数|目标函数|概率表达式|计算式|"
+                          r"\b(?:latex|equations?|formul(?:a|as|ae))\b", re.I),
 }
-SCOPE_CHOICES = {"预览数据和图表": list(EVIDENCE_TERMS), "只看关键数据": ["metric"], "只看图表": ["figure", "table"]}
+SCOPE_CHOICES = {"预览数据和图表": ["metric", "figure", "table"], "只看关键数据": ["metric"],
+                 "只看图表": ["figure", "table"], "只看公式": ["formula"]}
 PAPER_CONTEXT = re.compile(r"论文|文献|文章|研究里|paper\b|这[一几两三]?[篇份]|那[一几两三]?[篇份]", re.I)
 PREVIOUS_REF = re.compile(r"刚才|刚刚|上(?:面|次|一[批篇轮])|这[一几两三]?[批篇份]|那[一几两三]?[批篇份]|它[们俩]?|接着|还是|再看|也看")
 REPEAT_SCOPE = re.compile(r"照旧|照[刚上]次|按.{0,6}(?:来|一样|处理)|同样|一样(?:来|处理)|也(?:来|做|跑|处理)一[遍下]|也这么")
@@ -191,6 +194,49 @@ class Conversation:
     def _read_schema(self):
         with step("读取数据表字段", tool=self.table_tool):
             return self.table.schema()
+
+    def _table_lookup(self, kind):
+        if kind == "clarify":
+            return f"你想了解「{self.table_name}」的哪一部分？可以回复“看记录”“查看字段”或“一共有几条记录”。"
+        schema = self._read_schema() if kind != "count" else []
+        if kind == "columns":
+            from admin_dialog import TYPE_LABEL
+            details = "、".join(f"{f['name']}（{TYPE_LABEL.get(f['type'], f['type'])}）" for f in schema)
+            return f"「{self.table_name}」有 {len(schema)} 个字段。\n{details}"
+        with step("查询数据表的可见记录", tool=self.table_tool):
+            rows = self.table.rows()
+        summary = f"「{self.table_name}」共有 {len(rows)} 条可见记录。"
+        if kind == "count":
+            return summary
+        identities = [f["name"] for role in ("title", "url") for f in _fields(schema, role)]
+        if kind == "paper_count":
+            if not identities:
+                return summary + "当前表缺少可识别的论文标题或链接字段，无法核对论文数量。"
+            total = sum(any(row["fields"].get(name) for name in identities) for row in rows)
+            return summary + f"其中 {total} 条填写了论文标题或链接。"
+        names = [field["name"] for field in schema]
+        columns = "、".join(names[:12]) + ("等" if len(names) > 12 else "")
+        lines = [summary, f"{len(names)} 个字段：{columns}。"]
+        # 飞书空行也计入记录数，示例优先展示有内容的行，避免前几行空白掩盖实际数据。
+        order = list(dict.fromkeys(identities + names))
+        previews = []
+        for row in rows:
+            cells = row["fields"]
+            filled = [name for name in order if cells.get(name)]
+            if not filled:
+                continue
+            preview = []
+            for name in filled[:2]:
+                value = " ".join(str(cells[name]).split())
+                preview.append(f"{name}：{value[:100]}" + ("…" if len(value) > 100 else ""))
+            previews.append(" · ".join(preview))
+            if len(previews) == 5:
+                break
+        if previews:
+            lines.extend(["非空记录预览（最多 5 条）", *previews])
+        elif rows:
+            lines.append("当前可见记录的字段均为空。")
+        return "\n".join(lines)
 
     def _saved_status(self, message):
         urls = _evidence_urls(message) or self._previous_evidence_urls(message)
@@ -430,6 +476,17 @@ class Conversation:
         with self.lock:
             if pending_id and self.pending and pending_id != self.pending["id"]:
                 raise ValueError("上一项确认已经结束，请使用当前预览。")
+            from admin_dialog import infer_table_lookup, table_lookup_kind
+            if (self.pending or not pending_id) and (not self.pending or message not in self.pending.get("choices", ())):
+                lookup = table_lookup_kind(message, self.table_name) or infer_table_lookup(message, self.table_name)
+                # 原有模型字段查询保留其规划、工具追踪；离线模式也能回答相同的口语提问。
+                from agent_router import is_candidate
+                model_fields = lookup == "columns" and not self.pending and is_candidate(message) and model_support.enabled()
+                if lookup and not model_fields:
+                    answer = {"message": self._table_lookup(lookup)}
+                    if self.pending:
+                        answer["pending_id"] = self.pending["id"]
+                    return answer
             if re.fullmatch(r"(?:取消(?:吧|此次操作|本次操作)?|算了|不用了|先不写|先[别不](?:回填|提交)了?|停止)[。！!]?", message):
                 self.pending = None
                 return {"message": "已取消，表格保持原样。"}

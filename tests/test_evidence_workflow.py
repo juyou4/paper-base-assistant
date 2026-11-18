@@ -71,6 +71,45 @@ class EvidenceWorkflowTests(unittest.TestCase):
         with patch.object(self.table, "upsert", side_effect=AssertionError("不应重写相同内容")):
             self.assertEqual(commit(self.table, repeat)["evidence_results"][0]["status"], "verified")
 
+    def test_latex_survives_preview_confirm_readback_and_repeat(self):
+        latex = "\\begin{aligned}\ny &= \\frac{x_1}{2} \\\\\nz &= x^{2}\n\\end{aligned}"
+        item = dict(kind="formula", label="Equation 1", value=latex, latex=latex, quote=latex,
+                    source="式 (1)", source_url=LINK.replace("/abs/", "/html/") + "#eq1")
+
+        def formula(url, *, include_formulas):
+            self.assertTrue(include_formulas)
+            return {"url": url, "title": "示例", "items": [item]}
+
+        self.extract.side_effect = formula
+        for field in ("研究笔记", "论文公式"):
+            with self.subTest(field=field):
+                if field == "论文公式":
+                    self.table.add_field(field, "text")
+                before = self.table.rows()
+                plan, response = prepare(self.table, [LINK], kinds=["formula"])
+                preview = response["evidence_preview"][0]["items"][0]
+                self.assertEqual((preview["field"], preview["latex"]), (field, latex))
+                self.assertEqual(self.table.rows(), before)
+                receipt = commit(self.table, plan)["evidence_results"][0]
+                self.assertEqual(receipt["status"], "verified")
+                saved = self.table.get(receipt["record_id"])["fields"][field]
+                self.assertIn("$$\n" + latex + "\n$$", saved)
+                self.assertIn(item["source_url"], saved)
+                again, _ = prepare(self.table, [LINK], kinds=["formula"])
+                self.assertEqual(again["entries"][0]["action"], "unchanged")
+
+    def test_missing_math_source_is_visible_before_confirming(self):
+        self.extract.side_effect = lambda url, **_: extracted(url)
+        only, response = prepare(self.table, [LINK], kinds=["formula"])
+        self.assertEqual(only["ready"], 0)
+        self.assertIn("公式源码", response["evidence_preview"][0]["error"])
+        mixed, response = prepare(self.table, [LINK], kinds=["metric", "formula"])
+        self.assertEqual(mixed["ready"], 1)
+        paper = response["evidence_preview"][0]
+        self.assertIn("公式源码", paper["notice"])
+        self.assertEqual({i["kind"] for i in paper["items"]}, {"metric"})
+        self.assertFalse(self.table.rows())
+
     def test_partial_drift_and_duplicate_paper(self):
         plan, _ = prepare(self.table, [LINK, OTHER, LINK], kinds=["metric"])
         self.table.upsert(OTHER, {"论文链接": OTHER, "阅读笔记": "别人刚填写"}, "r")

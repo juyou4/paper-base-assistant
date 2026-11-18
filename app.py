@@ -2,8 +2,8 @@
 
 import argparse
 import json
-import mimetypes
 import os
+import re
 import secrets
 import threading
 import time
@@ -21,6 +21,12 @@ from workflow import Conversation
 
 
 ROOT = Path(__file__).resolve().parent
+WEB_TYPES = {
+    "/index.html": "text/html", "/style.css": "text/css", "/app.js": "text/javascript",
+    "/rich-text.js": "text/javascript", "/vendor/katex/katex.min.js": "text/javascript",
+    "/vendor/katex/katex.min.css": "text/css", "/vendor/markdown-it/markdown-it.min.js": "text/javascript",
+}
+KATEX_FONT = re.compile(r"/vendor/katex/fonts/KaTeX_[A-Za-z0-9-]+\.woff2")
 
 
 class Application:
@@ -170,10 +176,14 @@ class Handler(BaseHTTPRequestHandler):
                 paper = papers.resolve_paper(target, app.data_dir)
                 local = papers.download_pdf(paper, app.data_dir)
                 self.send_body(local.read_bytes(), "application/pdf", extra={"Content-Disposition": f'inline; filename="{local.name}"'})
-            elif method == "GET" and route.path in {"/", "/index.html", "/app.js", "/style.css"}:
-                name = route.path.strip("/") or "index.html"
-                mime = mimetypes.guess_type(name)[0] or "text/plain"
-                self.send_body((ROOT / "web" / name).read_bytes(), mime + "; charset=utf-8")
+            elif method == "GET" and (route.path == "/" or route.path in WEB_TYPES or KATEX_FONT.fullmatch(route.path)):
+                path = "/index.html" if route.path == "/" else route.path
+                asset = ROOT / "web" / path[1:]
+                if not asset.is_file():
+                    self.send_json({"error": "找不到该资源。"}, 404)
+                    return
+                mime = WEB_TYPES[path] + "; charset=utf-8" if path in WEB_TYPES else "font/woff2"
+                self.send_body(asset.read_bytes(), mime)
             else:
                 self.send_json({"error": "找不到该资源。"}, 404)
         except (BrokenPipeError, ConnectionResetError):

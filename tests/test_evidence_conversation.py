@@ -53,3 +53,14 @@ class EvidenceConversationTests(unittest.TestCase):
             self.chat.respond("提取实验数据 " + " ".join(f"arXiv:2005.{10000+i}" for i in range(9)))
         self.chat.respond("不要提取 arXiv:2005.11401 的关键数据")
         self.prepare.assert_not_called()
+
+    def test_math_scope_in_a_followup_or_with_a_link_only_previews(self):
+        url = "https://arxiv.org/abs/2005.11401v4"
+        with patch("evidence_workflow.commit") as commit:
+            preview = self.chat.respond(f"想看看 {url} 里的公式和实验数据")
+            self.prepare.assert_called_once_with(self.table, [url], kinds=["metric", "formula"])
+            self.prepare.reset_mock()
+            narrowed = self.chat.respond("先只看方程", preview["pending_id"])
+            self.prepare.assert_called_once_with(self.table, [url], kinds=["formula"])
+            self.assertNotEqual(preview["pending_id"], narrowed["pending_id"])
+            commit.assert_not_called()

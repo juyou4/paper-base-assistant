@@ -9,6 +9,7 @@ from html.parser import HTMLParser
 from urllib.parse import quote, urljoin, urlsplit
 
 import papers
+from math_evidence import FormulaReader, MathNode, formula_item
 
 
 NUMBER = re.compile(r"[-+−]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:\s*(?:±|\+/-)\s*\d+(?:\.\d+)?)?\s*%?")
@@ -44,7 +45,7 @@ class _Article(HTMLParser):
         self.title, self.heading, self.meta_title = "", None, ""
         self.cell, self.row, self.caption = None, None, None
         self.in_head = False
-        self.math_alt = None
+        self.math = None
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
@@ -55,6 +56,12 @@ class _Article(HTMLParser):
         if tag == "figure" or (tag == "table" and not self.stack):
             self.stack.append(dict(tag=tag, anchor=a.get("id", ""), image="", caption="", rows=[], invalid=False))
         if not self.stack:
+            return
+        if self.math is not None:
+            self.math.start(tag, a)
+            return
+        if tag == "math":
+            self.math = MathNode(a)
             return
         f = self.stack[-1]
         if tag in ("figcaption", "caption"):
@@ -67,14 +74,12 @@ class _Article(HTMLParser):
             self.row = []
         if tag in ("td", "th") and self.row is not None:
             self.cell = ([], _span(a.get("rowspan")), _span(a.get("colspan")), tag)
-        if tag == "math" and a.get("alttext"):
-            self.handle_data(a["alttext"])
-            self.math_alt = a["alttext"]
         if tag == "br":
             self.handle_data(" ")
 
     def handle_data(self, text):
-        if self.math_alt:
+        if self.math is not None:
+            self.math.text(text)
             return
         if self.heading is not None:
             self.heading.append(text)
@@ -88,8 +93,14 @@ class _Article(HTMLParser):
             if not self.title:
                 self.title = _clean("".join(self.heading))
             self.heading = None
-        if tag == "math":
-            self.math_alt = None
+        if self.math is not None:
+            if tag == "math":
+                markup = self.math.marked_text()
+                self.math = None
+                self.handle_data(markup)
+            else:
+                self.math.end(tag)
+            return
         if not self.stack:
             return
         f = self.stack[-1]
@@ -216,7 +227,7 @@ def _table_item(label, caption, source, url, headers, rows):
     return _item("table", label, caption, source, url, detail or caption, headers=headers, rows=sample)
 
 
-def _article_evidence(html, url, preferred_table=None):
+def _article_evidence(html, url, preferred_table=None, *, include_formulas=False):
     doc = _Article()
     doc.feed(html)
     doc.close()
@@ -250,6 +261,11 @@ def _article_evidence(html, url, preferred_table=None):
         items.append(table)
         items.extend(metrics[:2])
     items.extend(figures[:2])
+    if include_formulas:
+        reader = FormulaReader(url)
+        reader.feed(html)
+        reader.close()
+        items.extend(reader.items())
     if not any(i["kind"] == "metric" for i in items):
         page = papers._PageText()
         page.feed(html)
@@ -266,7 +282,7 @@ def _result_sentences(text):
             if 12 <= len(value) <= 380 and RESULT.search(value) and MEASURE.search(value)]
 
 
-def _snapshot(version):
+def _snapshot(version, *, include_formulas=False):
     """两个带版本的公开表格片段，按作者表中的行列抄录。链接直达该版本原始图表。"""
     base = "https://arxiv.org/html/" + version
     if version == "1706.03762v7":
@@ -287,7 +303,17 @@ def _snapshot(version):
     table = _table_item(table_label, caption, origin + table_label, base + "#" + table_anchor, headers, rows)
     figure = _item("figure", "Figure 1", fig_caption, origin + "Figure 1", base + "#" + figure_anchor,
                    fig_caption, image_url=base + "/" + image)
-    return title, [table, *_scalar_items(table)[:3], figure]
+    items = [table, *_scalar_items(table)[:3], figure]
+    if include_formulas:
+        if version == "1706.03762v7":
+            label, anchor = "公式 (1)", "S3.E1"
+            tex = r"\mathrm{Attention}(Q,K,V)=\mathrm{softmax}(\frac{QK^{T}}{\sqrt{d_{k}}})V"
+        else:
+            label, anchor = "RAG-Token 独立公式", "S2.Ex2"
+            tex = (r"p_{\text{\tiny{RAG-Token}}}(y|x)\;\approx\;\prod_{i}^{N}\;\sum_{z\in\text{top-}k(p(\cdot|x))}"
+                   r"p_{\eta}(z|x)p_{\theta}(y_{i}|x,z,y_{1:i-1})")
+        items.append(formula_item(label, tex, True, origin + label, base + "#" + anchor))
+    return title, items
 
 
 def _pdf_items(data, pdf_url):
@@ -394,7 +420,7 @@ def _pdf_evidence(paper):
         return structured + captions
 
 
-def extract_evidence(url: str) -> dict:
+def extract_evidence(url: str, *, include_formulas=False) -> dict:
     arxiv, external = papers._find_target(url)
     if arxiv:
         canonical = "https://arxiv.org/abs/" + arxiv
@@ -404,13 +430,13 @@ def extract_evidence(url: str) -> dict:
         try:
             html = papers._read_html(article, 5 * 1024 * 1024)
             preferred = {"1706.03762": "Table 2", "2005.11401": "Table 1"}.get(base_id)
-            title, items = _article_evidence(html, article, preferred)
+            title, items = _article_evidence(html, article, preferred, include_formulas=include_formulas)
         except (OSError, ValueError):
             title, items = "", []
         if title and items:
             return {"title": title, "url": canonical, "items": items}
         if sample and arxiv in (base_id, sample):
-            title, items = _snapshot(sample)
+            title, items = _snapshot(sample, include_formulas=include_formulas)
             return {"title": title, "url": "https://arxiv.org/abs/" + sample, "items": items}
     elif not papers._trusted_url(external) or urlsplit(external).hostname != "aclanthology.org":
         raise ValueError("提取数据与图表支持 arXiv 和 ACL Anthology 论文链接。")
