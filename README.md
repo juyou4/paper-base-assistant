@@ -2,7 +2,7 @@
 
 用中文把论文存进飞书多维表格。助手先读取当前表的真实列名和类型，遇到两列都叫得通的情况会追问，写入后按记录 ID 回读。也可以使用内置的 SQLite 阅读清单体验完整对话。
 
-已在真实飞书测试表完成一篇非内置论文的录入：输入《Attention Is All You Need》的 arXiv 链接后，助手建行保存标题和链接，从论文的第 3 节提取英文方法段，再补写到同一行。独立运行飞书官方 CLI 的 `base +record-get`，按记录 ID 核对了标题、链接和方法字段。[原文第 3 节](https://arxiv.org/html/1706.03762#S3) · [Windows 与 Linux 自动测试](https://github.com/juyou4/paper-base-assistant/actions/workflows/test.yml)
+真实飞书测试表已录入两篇非内置论文。《Attention Is All You Need》的方法摘自第 3 节。新版演示录入 BART 后，助手从 PDF 第 2 页提取了 362 个字符的英文方法段，补到同一条记录。随后独立运行飞书官方 CLI 的 `base +record-get`，按记录 ID 读取标题、链接和方法，核对了正式题名、官网地址，并将方法与 PDF 原文逐字比对。[BART 原文第 2 页](https://aclanthology.org/2020.acl-main.703.pdf#page=2) · [Attention 原文第 3 节](https://arxiv.org/html/1706.03762#S3) · [Windows 与 Linux 自动测试](https://github.com/juyou4/paper-base-assistant/actions/workflows/test.yml)
 
 2026 年 11 月 18 日还在同一测试表实测了字段增删改查。通过对话新建一个空文本列，查询其字段 ID，确认改名并回读，再按同一个 ID 删除。字段数由 7 变为 8 再回到 7，6 条已有记录的 ID 和其他字段定义前后一致。协作者及高级角色变更使用本地示例与模拟官方 API 响应验收；该次真实租户验收保留了原有人员权限。
 
