@@ -23,6 +23,40 @@ ROLES = {
 LABEL = {"url": "论文链接", "title": "论文标题", "abstract": "摘要", "method": "方法", "note": "笔记"}
 STORE = r"存|填|写|放|记入|记录|收录|收下|入库|入表|录入|添加|加到|加入|加进|补|登记|导入|保存|收进|更新|同步|收藏"
 REFERENCE = re.compile(r"https?://|arxiv\s*[:：]|(?<![\da-z])\d{4}\.\d{4,5}(?!\d)", re.I)
+EVIDENCE_REFERENCES = re.compile(
+    rf"""https?://[^\s<>"'`，。；、！？（）【】,;\u4e00-\u9fff]+|(?<![\w.]){papers.ARXIV_ID}(?![a-zA-Z0-9.])""",
+    re.I | re.ASCII,
+)
+
+
+def _evidence_urls(message):
+    urls = []
+    for match in EVIDENCE_REFERENCES.finditer(message):
+        arxiv, url = papers._find_target(match.group())
+        target = "https://arxiv.org/abs/" + arxiv if arxiv else url
+        if target not in urls:
+            urls.append(target)
+    if len(urls) > 8:
+        raise ValueError("每次最多可预览 8 篇论文，请分批发送。")
+    return urls
+
+
+def _evidence_kinds(message):
+    if re.search(r"(?:把|将)\s*[「『“‘\"'].+?[」』”’\"']\s*(?:记录|填|写|放|存|记)", message):
+        return []
+    if re.search(r"(?:别|不要|不用|停止|取消)(?:再)?(?:提取|抽取|预览|整理|回填)"
+                 r"|改名|建列|删除字段|(?:新建|增加|新增|创建|添加)(?:文本|链接|数字|一个|一)?(?:列|字段)", message):
+        return []
+    if not re.search(r"提取|抽取|回填|摘录|预览|整理|抓取|汇总|" + STORE, message):
+        return []
+    kinds = []
+    if re.search(r"指标|关键数[据值]|实验(?:数据|结果)|量化结果|数值结果|关键结果|数据[与和及、/]图|提取(?:论文)?数据", message):
+        kinds.append("metric")
+    if re.search(r"图表|插图|图片|架构图|示意图|曲线图|图[和与]表|原图", message):
+        kinds.append("figure")
+    if re.search(r"图表|结果表|实验表|论文.{0,3}表格|(?:提取|预览|抽取)表格|表格数据|表格内容|图和表|图与表", message):
+        kinds.append("table")
+    return kinds
 
 
 def _clean(value):
@@ -110,6 +144,7 @@ class Conversation:
         self.last = None
         self.last_title = ""
         self.pending = None
+        self.last_evidence_receipt = None
         self.selected_model = None
         self.activity = History()
         self.lock = threading.RLock()
@@ -123,6 +158,18 @@ class Conversation:
     def _read_schema(self):
         with step("读取数据表字段", tool=self.table_tool):
             return self.table.schema()
+
+    def _preview_evidence(self, urls, kinds):
+        from evidence_workflow import prepare
+        plan, reply = prepare(self.table, urls, kinds=kinds)
+        batch_id = uuid.uuid4().hex
+        reply["evidence_preview"] = {"id": batch_id, "papers": reply["evidence_preview"]}
+        reply.pop("choices", None)
+        self.pending = None
+        if plan["ready"]:
+            reply["pending_id"] = batch_id
+            self.pending = {"id": batch_id, "stage": "evidence_confirm", "plan": plan, "reply": reply}
+        return reply
 
     def _commit(self, plan):
         paper = plan["paper"]
@@ -257,14 +304,33 @@ class Conversation:
 
     def respond(self, message, pending_id=None, request_id=None):
         with self.lock:
+            if pending_id and self.pending and pending_id != self.pending["id"]:
+                raise ValueError("上一项确认已经结束，请使用当前预览。")
             if re.fullmatch(r"(?:取消|算了|不用了|先不写|停止)[。！!]?", message):
                 self.pending = None
                 return {"message": "已取消，表格保持原样。"}
             if self.pending:
                 task = self.pending
-                if pending_id and pending_id != task["id"]:
-                    raise ValueError("上一项确认已经结束，请刷新后重发指令。")
                 stage, plan = task["stage"], task["plan"]
+                if stage == "evidence_urls":
+                    urls = _evidence_urls(message)
+                    if not urls:
+                        return self._ask(plan, task["message"], [], stage)
+                    return self._preview_evidence(urls, plan["kinds"])
+                if stage == "evidence_confirm":
+                    action = re.fullmatch(r"(确认回填|取消回填)(?:\s+([0-9a-f]{32}))?[。！!]?", message)
+                    if not action:
+                        return task["reply"]
+                    if (action[2] or pending_id) != task["id"]:
+                        raise ValueError("请使用这批论文预览下方的确认或取消按钮。")
+                    if action[1] == "取消回填":
+                        self.pending = None
+                        return {"message": "已取消本批回填。"}
+                    from evidence_workflow import commit
+                    result = commit(self.table, plan)
+                    self.last_evidence_receipt = (task["id"], result)
+                    self.pending = None
+                    return result
                 if stage == "ambiguous_paper" or (stage == "ambiguous_intent" and REFERENCE.search(message)):
                     if not REFERENCE.search(message):
                         return self._ask({}, "请发你指的那篇论文链接或 arXiv 编号。", [], "ambiguous_paper")
@@ -318,11 +384,31 @@ class Conversation:
                     field = slot.pop("candidates")[choice]
                     slot.update(field_id=field["id"], field_name=field["name"], field_type=field["type"])
                 return self._commit(plan)
+            if self.last_evidence_receipt:
+                completed_id, receipt = self.last_evidence_receipt
+                if (message in ("确认回填", f"确认回填 {completed_id}")
+                        and (pending_id == completed_id or
+                             (not pending_id and message == f"确认回填 {completed_id}"))):
+                    return receipt
             if pending_id:
                 raise ValueError("这项确认已结束。请重新发起指令。")
+            if re.match(r"^(?:确认回填|取消回填)(?:\s|$)", message):
+                raise ValueError("当前对话没有这批待确认数据，请重新提取并预览。")
             if re.match(r"^(?:请问|我想知道|讲讲|告诉我)?\s*(?:如何|怎么才能|怎样|要怎么|能否介绍|怎么把|怎么将)", message):
                 return {"message": "可以先说“查看字段”或“查看角色「论文审阅人」的权限”。需要执行时，请直接指定目标和新值。此处仅说明用法。"}
-            if re.search(r"别写|不要|不要改|别存|先别|暂不|不写入|只预览", message):
+            kinds = _evidence_kinds(message)
+            if kinds:
+                destination = _destination(message)
+                current_names = {self.table_name, "当前表", "本表", "这张表", "表", "飞书表", "飞书多维表", "清单"}
+                if destination.endswith(("表", "清单")) and destination not in current_names:
+                    return {"message": f"当前连接的是「{self.table_name}」。请切换到目标表，或明确使用当前表。"}
+                urls = _evidence_urls(message)
+                if not urls and self.last and re.search(r"刚才|上一篇|这篇|那篇", message):
+                    urls = [self.last]
+                if urls:
+                    return self._preview_evidence(urls, kinds)
+                return self._ask({"kinds": kinds}, "请发论文链接或 arXiv 编号。多篇可用空格或换行分隔，最多 8 篇。", [], "evidence_urls")
+            if re.search(r"别写|不要|不要改|别存|先别|暂不|不写入|只预览|不用提取|取消提取", message):
                 return {"message": "已保留原数据。需要写入时，请发论文链接和目标字段。"}
             from admin_dialog import parse_admin
             if model_support.agent_info()["enabled"]:

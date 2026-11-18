@@ -91,6 +91,10 @@
           </div>
           <div class="example-grid" id="example-grid">
             <span class="example-glide" id="example-glide" aria-hidden="true"></span>
+            <button type="button" data-example="evidence" title="从两篇示例论文提取关键数据与图表，核对后回填">
+              <span>批量提取数据与图表</span>
+              <i aria-hidden="true">↗</i>
+            </button>
             <button type="button" data-example="save">
               <span>存入示例论文</span>
               <i aria-hidden="true">↗</i>
@@ -113,7 +117,7 @@
         <div class="chat" id="chat" role="log" aria-live="polite" aria-label="对话记录">
           <article class="intro-message message assistant" id="welcome">
             <div class="bubble">
-              <p>发一篇论文链接，或点上方「存入示例论文」试试。</p>
+              <p>可以粘贴多篇论文链接，或点「批量提取数据与图表」试试。</p>
             </div>
           </article>
         </div>
@@ -265,6 +269,27 @@
       </div>
     </div>
   </main>
+
+  <dialog id="evidence-review" aria-labelledby="review-title" aria-describedby="review-summary">
+    <div class="detail-shell">
+      <header class="detail-head">
+        <div>
+          <h2 id="review-title" tabindex="-1">核对论文提取结果</h2>
+          <p id="review-summary"></p>
+        </div>
+        <button type="button" class="icon-pill" id="review-close" aria-label="关闭预览">关闭</button>
+      </header>
+      <div class="review-tools">
+        <label>论文<select id="review-paper-select" aria-label="切换核对的论文"></select></label>
+        <label>提取项<select id="review-kind" aria-label="筛选提取项"></select></label>
+      </div>
+      <div id="review-papers"></div>
+      <footer class="review-footer" hidden>
+        <button type="button" class="icon-pill" id="review-cancel">取消回填</button>
+        <button type="button" class="send-pill" id="review-confirm">确认回填</button>
+      </footer>
+    </div>
+  </dialog>
 
   <dialog id="detail">
     <div class="detail-shell">

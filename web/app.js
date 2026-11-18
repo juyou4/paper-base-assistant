@@ -26,6 +26,7 @@ let ready = false;
 let switchingModel = false;
 let refreshingState = false;
 let pendingId = null;
+let reviewId = null;
 let selectedId = null;
 let viewMode = "cards";
 let latestStateRequest = 0;
@@ -443,6 +444,8 @@ function controls() {
   document.querySelectorAll("[data-choice]").forEach(btn => {
     btn.disabled = locked || btn.dataset.task !== pendingId;
   });
+  byId("review-confirm").disabled = byId("review-cancel").disabled =
+    locked || !reviewId || reviewId !== pendingId;
   const emptyCta = byId("empty-try-btn");
   if (emptyCta) emptyCta.disabled = locked || Boolean(pendingId);
 }
@@ -924,6 +927,151 @@ function showEvidence(items) {
   });
 }
 
+// 论文预览只连接到提取器支持的原文站点。原文和表格单元格都作为纯文本显示。
+function paperSourceLink(address) {
+  try {
+    const url = new URL(address);
+    const hosts = ["arxiv.org", "aclanthology.org"];
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.port ||
+        !hosts.some(host => url.hostname === host || url.hostname.endsWith("." + host))) return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+const evidenceKinds = { metric: "关键数据", figure: "图", table: "表" };
+
+function reviewItem(item, paperUrl) {
+  const block = make("section", undefined, "review-item");
+  block.dataset.kind = item.kind;
+  const kind = evidenceKinds[item.kind] || "论文摘录";
+  const meta = make("div", undefined, "review-meta");
+  meta.append(make("span", kind, "evidence-tag"));
+  if (item.field) meta.append(make("span", "回填至「" + item.field + "」"));
+  block.append(meta, make("h4", item.label));
+  if (item.value && item.value !== item.label) block.append(make("p", item.value, "review-value"));
+
+  if (Array.isArray(item.rows) && item.rows.length) {
+    const frame = make("div", undefined, "review-table-scroll");
+    frame.tabIndex = 0;
+    frame.setAttribute("role", "region");
+    frame.setAttribute("aria-label", item.label || "原文表格");
+    const table = make("table");
+    if (Array.isArray(item.headers) && item.headers.length) {
+      const head = table.createTHead().insertRow();
+      for (const value of item.headers) head.append(make("th", value));
+    }
+    const body = table.createTBody();
+    for (const values of item.rows) {
+      if (!Array.isArray(values)) continue;
+      const row = body.insertRow();
+      for (const value of values) row.insertCell().textContent = value;
+    }
+    frame.append(table);
+    block.append(frame);
+  }
+  const imageUrl = paperSourceLink(item.image_url);
+  if (imageUrl) {
+    const figure = link("", imageUrl, "review-image");
+    const img = make("img");
+    img.alt = item.label || "论文原图";
+    img.loading = "lazy";
+    img.referrerPolicy = "no-referrer";
+    img.addEventListener("error", () => img.remove(), { once: true });
+    img.src = imageUrl;
+    figure.append(img, make("span", "打开原图 ↗"));
+    block.append(figure);
+  }
+  if (item.quote && item.quote !== item.value) {
+    const quote = make("details", undefined, "review-quote");
+    quote.append(make("summary", "查看原文摘录"), make("blockquote", item.quote));
+    block.append(quote);
+  }
+  const sourceUrl = paperSourceLink(item.source_url) || paperSourceLink(item.source) || paperUrl;
+  const label = item.source && !/^https?:/i.test(item.source) ? item.source : "论文原文";
+  if (sourceUrl) block.append(link(label + " ↗", sourceUrl, "review-source"));
+  else if (item.source) block.append(make("small", label));
+  return block;
+}
+
+function openEvidenceReview(preview) {
+  const dialog = byId("evidence-review");
+  const container = byId("review-papers");
+  container.replaceChildren();
+  const paperSelect = byId("review-paper-select");
+  paperSelect.replaceChildren();
+  const kindSelect = byId("review-kind");
+  reviewId = preview.id;
+  const readyPapers = preview.papers.filter(paper => paper.status === "ready");
+  const target = (state.mode === "feishu" ? "飞书" : "本地") + "「" + (state.table_name || "阅读清单") + "」";
+  byId("review-summary").textContent = preview.papers.length + " 篇论文 · " +
+    readyPapers.length + " 篇可回填 · " + target;
+  preview.papers.forEach((paper, index) => {
+    const paperUrl = paperSourceLink(paper.url);
+    const section = make("section", undefined, "review-paper");
+    const title = paper.title || paper.url || "论文";
+    paperSelect.add(new Option((index + 1) + ". " + title, index));
+    const action = { create: "新建记录", update: "更新记录", unchanged: "无需修改" }[paper.action];
+    const items = Array.isArray(paper.items) ? paper.items : [];
+    section.append(make("h3", title), make("span", paper.status === "ready"
+      ? [items.length + " 项", action].filter(Boolean).join(" · ") : "跳过本篇", "review-paper-meta"));
+    if (paperUrl) section.append(link("打开论文 ↗", paperUrl, "review-source"));
+    if (paper.error) section.append(make("p", paper.error, "review-error"));
+    if (paper.fields?.length) {
+      const modes = { set: "填入", append: "追加", unchanged: "保留原值" };
+      const mapping = paper.fields.map(field => (modes[field.mode] || "填入") + "「" + field.name + "」");
+      section.append(make("p", mapping.join(" · "), "review-mapping"));
+    }
+    for (const item of items) section.append(reviewItem(item, paperUrl));
+    container.append(section);
+  });
+  kindSelect.onchange = () => {
+    const active = container.children[paperSelect.selectedIndex];
+    for (const item of active.querySelectorAll(".review-item")) {
+      item.hidden = Boolean(kindSelect.value && item.dataset.kind !== kindSelect.value);
+    }
+    container.scrollTop = 0;
+    if (dialog.open && motionOk()) {
+      active.animate([{ opacity: 0.55, transform: "translateY(3px)" }, { opacity: 1, transform: "none" }],
+        { duration: 180, easing: "ease-out" });
+    }
+  };
+  paperSelect.onchange = () => {
+    const index = paperSelect.selectedIndex;
+    Array.from(container.children).forEach((section, i) => { section.hidden = i !== index; });
+    const items = preview.papers[index].items || [];
+    kindSelect.replaceChildren(new Option("全部（" + items.length + "）", ""));
+    for (const [kind, name] of Object.entries(evidenceKinds)) {
+      const count = items.filter(item => item.kind === kind).length;
+      if (count) kindSelect.add(new Option(name + "（" + count + "）", kind));
+    }
+    kindSelect.onchange();
+  };
+  paperSelect.onchange();
+  const actionable = Boolean(reviewId && reviewId === pendingId && readyPapers.length);
+  dialog.querySelector("footer").hidden = !actionable;
+  const totalItems = readyPapers.reduce((total, paper) => total + paper.items.length, 0);
+  byId("review-confirm").textContent = "确认回填 " + readyPapers.length + " 篇（" + totalItems + " 项）";
+  controls();
+  dialog.showModal();
+  byId("review-title").focus();
+  container.scrollTop = 0;
+}
+
+function appendEvidenceResults(article, results) {
+  const list = make("ul", undefined, "review-results");
+  const statuses = { verified: "回读一致", skipped: "已跳过", failed: "处理失败", unverified: "待核验" };
+  for (const result of results) {
+    const row = make("li");
+    row.dataset.status = result.status;
+    row.append(make("strong", statuses[result.status] || "待核验"), make("span", result.title || result.url));
+    if (result.message) row.append(make("small", result.message));
+    list.append(row);
+  }
+  article.append(list);
+}
+
 async function submit(text) {
   const instruction = text.trim();
   if (!instruction || busy || switchingModel || refreshingState || !ready) return;
@@ -957,7 +1105,15 @@ async function submit(text) {
     const { article } = appendMessage(result.message || "已完成。", "assistant");
     appendModelTrace(article, result.agent);
 
-    if (pendingId && Array.isArray(result.choices) && result.choices.length) {
+    if (result.evidence_preview?.papers?.length) {
+      const preview = result.evidence_preview;
+      const review = make("button", "查看提取结果", "icon-pill review-reopen");
+      review.type = "button";
+      review.addEventListener("click", () => openEvidenceReview(preview));
+      article.append(review);
+      review.focus({preventScroll: true});
+      openEvidenceReview(preview);
+    } else if (pendingId && Array.isArray(result.choices) && result.choices.length) {
       const choices = make("div", undefined, "choices");
       result.choices.forEach((choice, idx) => {
         const isCancel = /^(取消|算了|不用了)$/.test(choice);
@@ -974,6 +1130,7 @@ async function submit(text) {
       });
       article.append(choices);
     }
+    if (result.evidence_results?.length) appendEvidenceResults(article, result.evidence_results);
 
     const download = safeLink(result.download_url, true);
     if (download) {
@@ -987,17 +1144,18 @@ async function submit(text) {
     }
 
     if (result.row) selectedId = result.row.id;
+    const incomplete = result.evidence_results?.some(item => item.status !== "verified");
 
     if (result.verification) {
       const verifyEl = byId("verification");
-      verifyEl.className = "verify-status report";
+      verifyEl.className = "verify-status report" + (incomplete ? " incomplete" : "");
       verifyEl.textContent = result.verification;
       const iconEl = byId("verify-icon");
       iconEl.classList.remove("verified");
       void iconEl.offsetWidth;
-      iconEl.classList.add("verified");
-      morphSendButton("saved");
-      showToast(result.verification);
+      iconEl.classList.toggle("verified", !incomplete);
+      morphSendButton(incomplete ? "idle" : "saved");
+      showToast(result.verification, incomplete ? "error" : "ok");
     } else {
       morphSendButton("idle");
     }
@@ -1006,8 +1164,8 @@ async function submit(text) {
       showEvidence(Array.isArray(result.evidence) ? result.evidence : []);
     }
 
-    await refreshState(false);
-    if (result.row || result.verification) playRevealWave();
+    if (!result.evidence_preview) await refreshState(false);
+    if ((result.row || result.verification) && !incomplete) playRevealWave();
   } catch (err) {
     finishActivity(err.activity, true);
     morphSendButton("idle");
@@ -1046,6 +1204,7 @@ byId("prompt").addEventListener("keydown", event => {
 
 function runExample(key) {
   const examples = {
+    evidence: "批量提取以下论文的关键数据和图表，核对后回填。\nhttps://arxiv.org/abs/2005.11401v4\nhttps://arxiv.org/abs/1706.03762v7",
     save: "把 " + (state.sample.url || "https://arxiv.org/abs/2005.11401") + " 存进" + (state.table_name || "阅读清单"),
     method: "给刚才那篇补一句方法概述",
     notes: "把刚才那篇的方法写进笔记",
@@ -1087,6 +1246,16 @@ window.addEventListener("pageshow", event => {
   if (event.persisted && !busy && !switchingModel) refreshState();
 });
 byId("refresh").addEventListener("click", () => refreshState(true));
+const reviewDialog = byId("evidence-review");
+byId("review-close").addEventListener("click", () => reviewDialog.close());
+for (const [id, instruction] of [["review-cancel", "取消回填"], ["review-confirm", "确认回填"]]) {
+  byId(id).addEventListener("click", () => {
+    if (!reviewId || reviewId !== pendingId) return;
+    const message = instruction + " " + reviewId;
+    reviewDialog.close();
+    submit(message);
+  });
+}
 byId("close-detail").addEventListener("click", () => byId("detail").close());
 byId("detail").addEventListener("click", event => {
   if (event.target === byId("detail")) byId("detail").close();

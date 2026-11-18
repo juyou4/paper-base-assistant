@@ -8,6 +8,22 @@
 
 ![工作台实测截图，展示 Codex 模型、字段查询步骤和本地阅读清单](docs/demo.png)
 
+## 从论文提取关键数据和图表
+
+在工作台点 **批量提取数据与图表** 可预览 RAG 和 Transformer 两篇论文。也可在对话框输入自己的 arXiv 或 ACL Anthology 链接，每次最多 8 篇。
+
+```text
+提取这两篇论文的关键数据和图表
+https://arxiv.org/abs/2005.11401v4
+https://arxiv.org/abs/1706.03762v7
+```
+
+1. 展开某篇论文，核对指标的行名、列头、数值和目标列。比如在 Transformer 表 2 中，`28.4` 位于 `Transformer (big)` 行和 `BLEU / EN-DE` 列。可以沿出处链接查看原表，或点开架构图查看原图。[Transformer 表 2](https://arxiv.org/html/1706.03762v7#S6.T2)
+2. 核对窗口会标出每篇将新增或更新的记录，以及对应字段。与提取项同名的文本列优先，其次使用指标或图表专列。在默认六列示例中，指标写入「阅读笔记」，图表摘录、原图地址和出处写入「研究笔记」。已有笔记后追加新内容。
+3. 点 **确认回填** 后，服务端重新读取目标行、列和原值，再逐篇提交并按记录 ID 回读。点 **取消回填** 即结束该批次。提取失败、预览后目标发生变化或写入回执不一致时，可在逐篇结果中查看原因。
+
+arXiv HTML 保留原表行列、图题和可用原图链接。PDF 可通过 Poppler 的 `pdftotext` 从前 32 页读取图题、表题和带量化结果的句子，出处链接定位到对应页。可选安装 `python -m pip install pdfplumber`，从候选页提取带网格线的表格，保留原始行列。仅有曲线或扫描图像时，可打开原页人工核对。两篇内置示例在官网不可用时可显示标注了版本与出处的预核摘录。确认和写表由服务端执行，这条提取流程可独立于语言模型运行。
+
 ## 用真实 Agent 操作飞书
 
 准备一张自己可编辑的飞书测试表。登录飞书官方 CLI 后运行 `python tools/feishu_setup.py --mode cli`，按提示粘贴目标数据表的浏览器链接；推理使用本机已登录的官方 Codex CLI（需支持 `exec --ephemeral --ignore-user-config --output-schema`，可先用 `codex login status` 检查）：
@@ -136,6 +152,7 @@ flowchart LR
 ```
 
 - `workflow.py` 管理多轮对话状态、目标列选择与提交流程，各浏览器会话维护独立的待确认任务。
+- `evidence_extract.py` 把原文整理为带出处的指标、表格和图。`evidence_workflow.py` 保存本次预览的字段与原值，按用户确认的批次提交和回读。
 - `activity.py` 按会话和请求编号记录工具调用，供浏览器实时轮询进度并在失败时定位对应操作。
 - `preflight.py` 负责提交前核验；`admin_dialog.py` 解析管理意图，字段、协作者与高级角色变更分别由 `schema_admin.py`、`collaborator_admin.py` 和 `role_admin.py` 处理。
 - `papers.py`、`pdf_sections.py` 负责论文解析、PDF 下载和证据提取，同一 arXiv 编号的不同版本默认归入同一篇文章。
