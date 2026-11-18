@@ -1,6 +1,8 @@
 """使用本机已登录的 Codex CLI 对一段输入生成 JSON。"""
 
+import fnmatch
 import functools
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -9,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from urllib.parse import urlsplit
 
 
 _SCHEMA = {"type": "object", "properties": {"result_json": {"type": "string"}},
@@ -28,12 +31,84 @@ _OFF = (
 )
 
 
+def _windows_proxy_settings():
+    import winreg
+    path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as key:
+        if not winreg.QueryValueEx(key, "ProxyEnable")[0]:
+            return "", ""
+        try:
+            if winreg.QueryValueEx(key, "AutoConfigURL")[0]:
+                return "", ""  # PAC 会按目标动态选路，手动代理项不能代表其决策。
+        except FileNotFoundError:
+            pass
+        server = winreg.QueryValueEx(key, "ProxyServer")[0]
+        try:
+            bypass = winreg.QueryValueEx(key, "ProxyOverride")[0]
+        except FileNotFoundError:
+            bypass = ""
+    return server, bypass
+
+
+def _loopback_proxy(address):
+    url = address if "://" in address else "http://" + address
+    try:
+        parts = urlsplit(url)
+        if (parts.scheme not in {"http", "https"} or not parts.hostname or parts.username is not None
+                or parts.password is not None or parts.query or parts.fragment or parts.path not in {"", "/"}
+                or parts.port == 0):
+            return None
+        if parts.hostname == "localhost" or ipaddress.ip_address(parts.hostname).is_loopback:
+            return url
+    except ValueError:
+        pass
+    return None
+
+
+def _network_environment():
+    env = {}
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"):
+        value = os.getenv(key.lower(), os.getenv(key))
+        if value is not None:
+            env[key] = value
+    if os.name != "nt" or "HTTP_PROXY" in env or "HTTPS_PROXY" in env:
+        return env
+    try:
+        server, bypass = _windows_proxy_settings()
+    except OSError:
+        return env
+    if not isinstance(server, str) or not server.strip():
+        return env
+    # WinINet 可指定单个代理，也可按协议分别指定。
+    servers = {"http": server, "https": server}
+    if "=" in server:
+        servers = dict(entry.strip().lower().split("=", 1) for entry in server.split(";") if "=" in entry)
+    for scheme in ("http", "https"):
+        proxy = _loopback_proxy(servers.get(scheme, "").strip())
+        if proxy:
+            env[scheme.upper() + "_PROXY"] = proxy
+    if not ("HTTP_PROXY" in env or "HTTPS_PROXY" in env):
+        return env
+    # 直接匹配系统的主机通配符，避免自带 DNS 解析的 proxy_bypass_registry 阻塞每次推理。
+    skip = [entry.strip().lower() for entry in (bypass or "").split(";") if entry.strip()]
+    if "*" in skip:
+        return {"NO_PROXY": "*"}
+    hosts = ("chatgpt.com", "api.openai.com", "auth.openai.com")
+    excluded = [host for host in hosts if any(fnmatch.fnmatchcase(host, rule)
+                                               or fnmatch.fnmatchcase(host + ":443", rule) for rule in skip)]
+    if "<local>" in skip:
+        excluded.extend(("localhost", "127.0.0.1", "::1"))
+    if excluded:
+        env["NO_PROXY"] = ",".join(filter(None, [env.get("NO_PROXY"), *excluded]))
+    return env
+
+
 def _environment():
-    # CLI 自行管理已授权身份，只传登录所需目录与操作系统路径。
+    # CLI 自行管理已授权身份，只传操作系统路径和网络路由。
     keys = ("PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "HOMEDRIVE", "HOMEPATH", "USERPROFILE",
             "HOME", "APPDATA", "LOCALAPPDATA", "TMP", "TEMP", "TMPDIR", "LANG", "LC_ALL", "CODEX_HOME",
             "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
-    return {key: os.environ[key] for key in keys if os.environ.get(key)}
+    return {**{key: os.environ[key] for key in keys if os.environ.get(key)}, **_network_environment()}
 
 
 def _native(path):

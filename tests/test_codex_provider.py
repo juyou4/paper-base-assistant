@@ -19,6 +19,38 @@ def result(value):
 
 
 class CodexProviderTests(unittest.TestCase):
+    def test_explicit_network_environment_wins_over_system_discovery(self):
+        values = {"https_proxy": "http://explicit.example.test:8181", "no_proxy": "localhost",
+                  "FEISHU_APP_SECRET": "private", "PAPER_MODEL_KEY": "private"}
+        with patch.dict(os.environ, values, clear=True), patch.object(provider, "_windows_proxy_settings") as settings:
+            self.assertEqual(provider._environment(), {"HTTPS_PROXY": values["https_proxy"], "NO_PROXY": "localhost"})
+        settings.assert_not_called()
+
+    def test_system_proxy_inherits_by_protocol_and_honors_official_host_bypass(self):
+        proxy = ("http=localhost:8133;https=https://[::1]:8144", "<local>;*.openai.com;chatgpt.com:443")
+        with patch.dict(os.environ, {"NO_PROXY": "keep.example.test"}, clear=True), \
+                patch.object(os, "name", "nt"), patch.object(provider, "_windows_proxy_settings", return_value=proxy):
+            self.assertEqual(provider._network_environment(), {
+                "HTTP_PROXY": "http://localhost:8133", "HTTPS_PROXY": "https://[::1]:8144",
+                "NO_PROXY": "keep.example.test,chatgpt.com,api.openai.com,auth.openai.com,localhost,127.0.0.1,::1",
+            })
+
+    def test_automatic_proxy_requires_clean_loopback_http_address(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(os, "name", "nt"):
+            for address in ("", "proxy.example.test:8123", "http://u:p@127.0.0.1:8123", "socks5://127.0.0.1:8123",
+                            "http://localhost:bad", "http://localhost/?secret=abc"):
+                with self.subTest(address=address), patch.object(provider, "_windows_proxy_settings", return_value=(address, "")):
+                    self.assertEqual(provider._network_environment(), {})
+            with patch.object(provider, "_windows_proxy_settings", return_value=("127.0.0.1:8133", "<local>;*")):
+                self.assertEqual(provider._network_environment(), {"NO_PROXY": "*"})
+            with patch.object(provider, "_windows_proxy_settings", return_value=("127.0.0.1:8133", "<local>")):
+                self.assertEqual(provider._network_environment(), {
+                    "HTTP_PROXY": "http://127.0.0.1:8133", "HTTPS_PROXY": "http://127.0.0.1:8133",
+                    "NO_PROXY": "localhost,127.0.0.1,::1",
+                })
+            with patch.object(provider, "_windows_proxy_settings", side_effect=FileNotFoundError()):
+                self.assertEqual(provider._network_environment(), {})
+
     def test_catalog_projects_visible_slugs_in_priority_order_and_caches(self):
         directory = {
             "models": [
