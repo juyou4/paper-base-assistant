@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 _PAPER = (r"(?:它|(?:刚才|刚刚|刚|之前|上次|上面)?(?:选中|打开|回看|收藏|看过|读过)?的?"
           r"[这那]一?篇(?:论文|文献)?|上一篇(?:论文|文献)?)")
-_FIELD = r"(?:中文摘要|论文摘要|摘要|方法概述|研究方法|技术路线|方法|阅读笔记|研究笔记|笔记|论文链接|原文链接|资源链接|代码链接|代码仓库|模型链接|数据集链接|链接|记录|详情)"
+_FIELD = r"(?:中文摘要|论文摘要|摘要|方法概述|研究方法|技术路线|方法|阅读笔记|研究笔记|笔记|关键数据|实验指标|图表|公式|论文链接|原文链接|资源链接|代码链接|代码仓库|模型链接|数据集链接|链接|记录|详情)"
 _READ = r"(?:再|也|先)?(?:看看|看一下|看一眼|看下|查看|打开|回看|显示|读一下)"
 _QUESTION = re.compile(
     rf"(?:(?:请问|请|帮我|给我|我想|能不能|可以|那么|那)\s*)*(?P<read>{_READ})?\s*(?P<paper>{_PAPER})?"
@@ -73,6 +73,8 @@ def handle(chat, message):
     focus = preview[2] if during_preview else chat.saved_focus
     if (not focus or focus.table is not chat.table or (chat.last, chat.last_title) != (focus.last, focus.last_title)
             or not during_preview and (chat.collection_batch or chat.recent_evidence)):
+        if match["field"] in {"关键数据", "实验指标", "图表", "公式"}:
+            return None
         return _answer(chat, f"请先指定「{chat.table_name}」里的一篇收藏，例如“再看看《论文标题》”。")
 
     from saved_paper_dialog import _bind, open_saved_identity

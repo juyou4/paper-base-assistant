@@ -19,7 +19,7 @@ _FIND_AGAIN = re.compile(r"^(?:请|帮我|给我|我想)*再(?:帮我|给我)?(?
                          r"(?:一下|下)?\s*(.+)$")
 _LATIN_TITLE = re.compile(r"[A-Za-z0-9][A-Za-z0-9\s.+#&:’'()/,_-]{0,198}[A-Za-z0-9+#)]")
 _QUOTED = re.compile(r'[《「“"]([^》」”"\n]{1,200})[》」”"]')
-_DATA_FIELD = re.compile(r"\s*(?:的|里的)\s*(摘要|中文摘要|方法|方法概述|研究方法|阅读笔记|研究笔记|笔记|详情|记录|资源链接|代码链接|代码仓库|模型链接|数据集链接|链接)$")
+_DATA_FIELD = re.compile(r"\s*(?:的|里的)\s*(摘要|中文摘要|方法|方法概述|研究方法|阅读笔记|研究笔记|笔记|关键数据|实验指标|图表|公式|详情|记录|资源链接|代码链接|代码仓库|模型链接|数据集链接|链接)$")
 _NOT_TITLE = re.compile(r"网上|联网|公开题录|Crossref|网络上|全网|按.{0,4}排序|然后|顺便|和之前|查一下表|"
                         r"列|字段|权限|表格|原文|公式|图表|实验数据|表\s*\d|图\s*\d|提取|下载|收藏|写入|填入|删除|修改|"
                         r"所有|哪些|几篇|多少|关于|相关的|刚才|上次|之前|这张表|这篇|那篇|我存的|不要|取消|[，；;？?]", re.I)
@@ -136,9 +136,11 @@ def _open(chat, row, title, url, titles, links, pending, wanted, wanted_names, a
         lines.append("简称对应题名中的 “" + alias.evidence + "”。")
     details = [(key, str(value)) for key, value in row["fields"].items() if key not in titles + links and value
                and (wanted_names is None or key in wanted_names)]
-    if wanted in {"资源链接", "代码链接", "代码仓库", "模型链接", "数据集链接"}:
+    if wanted in {"关键数据", "实验指标", "图表", "公式", "资源链接", "代码链接", "代码仓库", "模型链接", "数据集链接"}:
         from saved_compare import _values
-        values = _values(chat._read_schema(), "代码链接" if wanted == "代码仓库" else wanted, row)
+        from source_library import evidence_columns
+        label = {"代码仓库": "代码链接", "实验指标": "关键数据"}.get(wanted, wanted)
+        values = _values(chat._read_schema(), label, row, evidence_columns(chat.table))
         details = [(v["field"], v["value"]) for v in values]
         wanted_names = [v["field"] for v in values]
     for key, value in details:

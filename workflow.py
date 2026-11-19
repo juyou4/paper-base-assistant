@@ -6,6 +6,7 @@ import uuid
 from urllib.parse import urlencode, urlsplit
 
 import papers
+import evidence_filter
 import model_support
 import source_library
 import saved_focus
@@ -125,6 +126,16 @@ def _evidence_scope(text):
                 excluded.update(kinds)
             else:
                 wanted.update(kinds)
+    scope = evidence_filter.parse(content)
+    if scope.get("metrics") or scope.get("columns"):
+        wanted.add("metric")
+    if scope.get("figures"):
+        wanted.add("figure")
+    if scope.get("tables"):
+        if "metric" in wanted and not re.search(r"整[张个]表|整表|原表|完整表格", content):
+            wanted.discard("table")
+        else:
+            wanted.add("table")
     return [kind for kind in EVIDENCE_TERMS if kind in wanted - excluded], excluded
 
 
@@ -136,7 +147,7 @@ def _kinds_by_paper(text, urls):
     clauses = separate_paper_clauses(text)
     if len(clauses) < 2:
         return None
-    groups = [(paper_positions(clause, len(urls)), _evidence_kinds(clause)) for clause in clauses]
+    groups = [(paper_positions(evidence_filter.without_locators(clause), len(urls)), _evidence_kinds(clause)) for clause in clauses]
     if not all(positions and kinds for positions, kinds in groups):
         # “第一篇和第二篇都看图”共用句末范围；“第一篇看图，第二篇”仍缺少后者的范围。
         return None if all(positions for positions, _ in groups) and not any(k for _, k in groups[:-1]) else {}
@@ -151,7 +162,7 @@ INCOMPLETE_EVIDENCE_SCOPE = "请补全每篇要看的内容，例如“第一篇
 
 
 def _preview_positions(text, urls, entries=()):
-    positions = paper_positions(text, len(urls), exclude=True)
+    positions = paper_positions(evidence_filter.without_locators(text), len(urls), exclude=True)
     if len(urls) < 2 or positions == []:
         return positions
     if re.search(r"前者|后者", text):
@@ -283,6 +294,7 @@ class Conversation:
         self.pending = None
         self.last_evidence_receipt = None
         self.recent_evidence = None
+        self.recent_filters = {}
         self.recent_saved = []
         self.collection_batch = []
         self.selected_model = None
@@ -440,19 +452,22 @@ class Conversation:
         return {"message": "这篇论文已有以下来源。", "collection": [
             source_library.card({**meta, "url": anchor}, sources or [anchor], row)]}
 
-    def _preview_evidence(self, urls, kinds):
+    def _preview_evidence(self, urls, kinds, filters=None):
         from evidence_workflow import prepare
         if isinstance(kinds, dict):
             if any(url not in kinds for url in urls):
                 return self._ask_evidence_scope(urls)
             kinds = {url: kinds[url] for url in urls}
         overrides = {"preferences": self.history_preferences} if self.history_preferences else {}
+        if filters:
+            overrides["filters"] = filters
         plan, reply = prepare(self.table, urls, kinds=kinds, **overrides)
         batch_id = uuid.uuid4().hex
         reply["evidence_preview"] = {"id": batch_id, "papers": reply["evidence_preview"]}
         reply.pop("choices", None)
         self.pending = None
         self.recent_evidence = (list(urls), kinds.copy())
+        self.recent_filters = filters or {}
         if len(urls) == 1:
             self.last = urls[0]
             self.last_title = next((paper.get("title") for paper in reply["evidence_preview"]["papers"]
@@ -490,17 +505,17 @@ class Conversation:
         return self._ask({"urls": urls}, prompt or "要先核对哪些内容？我会把原文出处和对应的目标列一起列出来。",
                          [*choices, "取消"], "evidence_scope")
 
-    def _start_evidence(self, urls, kinds):
+    def _start_evidence(self, urls, kinds, filters=None, *, paper_clauses=""):
         if urls:
-            return self._preview_evidence(urls, kinds)
-        return self._ask({"kinds": kinds}, "请发论文链接、DOI 或 arXiv 编号。多篇可以分行发送，也可以指定刚才那一批里的第几篇。",
+            return self._preview_evidence(urls, kinds, filters)
+        return self._ask({"kinds": kinds, "filters": filters, "paper_clauses": paper_clauses}, "请发论文链接、DOI 或 arXiv 编号。多篇可以分行发送，也可以指定刚才那一批里的第几篇。",
                          [], "evidence_urls")
 
-    def _ask_evidence_papers(self, urls, kinds):
+    def _ask_evidence_papers(self, urls, kinds, filters=None):
         self.pending = None
         choices = [f"第{i}篇" for i in range(1, len(urls) + 1)]
         numbered = "\n".join(f"{i}. {url}" for i, url in enumerate(urls, 1))
-        return self._ask({"urls": urls, "kinds": kinds},
+        return self._ask({"urls": urls, "kinds": kinds, "filters": filters},
                          f"当前批次有 {len(urls)} 篇。请按下面的顺序选论文，再核对新的回填预览。\n{numbered}",
                          [*choices, "全部重新预览", "取消"], "evidence_papers")
 
@@ -515,27 +530,34 @@ class Conversation:
         positions = _preview_positions(text, targets, entries)
         grouped = _kinds_by_paper(text, targets)
         kinds, excluded = _evidence_scope(text)
-        changing = explicit or positions is not None or excluded or re.search(r"只|仅|改|换|重新|再看|另", text)
-        if not changing or not (explicit or kinds or positions is not None or excluded):
+        filters = evidence_filter.for_papers(text, targets)
+        changing = filters or explicit or positions is not None or excluded or re.search(r"只|仅|改|换|重新|再看|另", text)
+        if not changing or not (filters or explicit or kinds or positions is not None or excluded):
             return task["reply"]
+        if filters and not explicit:
+            # “只要 ResNet-50”沿用刚才的表号和指标；同一维度的明确新值替换旧值。
+            filters = {url: {**self.recent_filters.get(url, self.recent_filters.get("*", {})),
+                             **filters.get(url, filters.get("*", {}))} for url in targets}
+        elif not (explicit or kinds):
+            filters = self.recent_filters
         if positions == []:
-            return self._ask_evidence_papers(targets, kinds or previous)
+            return self._ask_evidence_papers(targets, kinds or previous, filters)
         if positions is not None:
             targets = [targets[index] for index in positions]
         if grouped == {}:
             return self._ask_evidence_scope(targets, INCOMPLETE_EVIDENCE_SCOPE)
         self.pending = None
         if grouped:
-            return self._start_evidence(list(grouped), grouped)
+            return self._start_evidence(list(grouped), grouped, filters)
         if not kinds and isinstance(previous, dict):
             scopes = {url: [k for k in previous.get(url, []) if k not in excluded] for url in targets}
             scopes = {url: allowed for url, allowed in scopes.items() if allowed}
-            return self._start_evidence(list(scopes), scopes) if scopes else self._ask_evidence_scope(targets)
+            return self._start_evidence(list(scopes), scopes, filters) if scopes else self._ask_evidence_scope(targets)
         if not kinds:
             kinds = [kind for kind in previous if kind not in excluded]
         if not kinds:
             return self._ask_evidence_scope(targets)
-        return self._start_evidence(targets, kinds)
+        return self._start_evidence(targets, kinds, filters)
 
     def _route_evidence(self, message):
         text = EVIDENCE_REFERENCES.sub(" ", message)
@@ -562,11 +584,12 @@ class Conversation:
             if PLAIN_SAVE.search(text) and not PREVIEW_CUES.search(text):
                 return None
         urls = _evidence_urls(message)
+        filters = evidence_filter.for_papers(text, urls or (self.recent_evidence[0] if self.recent_evidence else []))
         if urls and kinds:
             grouped = _kinds_by_paper(text, urls)
             positions = _preview_positions(text, urls)
             if positions == []:
-                return self._ask_evidence_papers(urls, kinds)
+                return self._ask_evidence_papers(urls, kinds, filters)
             if grouped:
                 urls, kinds = list(grouped), grouped
             elif positions is not None:
@@ -576,6 +599,7 @@ class Conversation:
         previous = False
         if not kinds and self.recent_evidence and REPEAT_SCOPE.search(text):
             kinds = self.recent_evidence[1]
+            filters = filters or self.recent_filters
             previous = True
         if not kinds and not bare and model_support.enabled():
             from evidence_intent import classify
@@ -589,7 +613,10 @@ class Conversation:
         current_names = {self.table_name, "当前表", "本表", "这张表", "表", "飞书表", "飞书多维表", "清单"}
         if destination.endswith(("表", "清单")) and destination not in current_names:
             return {"message": f"当前连接的是「{self.table_name}」。请切换到目标表，或明确使用当前表。"}
-        return self._start_evidence(urls, kinds) if kinds else self._ask_evidence_scope(urls)
+        if not kinds:
+            return self._ask_evidence_scope(urls)
+        clauses = text if len(separate_paper_clauses(text)) > 1 else ""
+        return self._start_evidence(urls, kinds, filters, paper_clauses=clauses)
 
     def _commit(self, plan):
         paper = plan["paper"]
@@ -735,6 +762,9 @@ class Conversation:
             wording = "、".join(values)
             receipt = {"record_id": row["id"], "url": paper["url"], "collection": bool(plan.get("collect")),
                        "fields": values, "change": write["action"]}
+            from title_aliases import title_alias_terms
+            answer["row_aliases"] = title_alias_terms(next((row["fields"][f["name"]] for f in _fields(schema, "title")
+                                                           if row["fields"].get(f["name"])), ""))
             answer.update(message=answer.get("message", "") + f"{action}。已核对「{self.table_name}」中的{wording}。",
                           preflight=checks, verification=f"写前核验通过 · 回读一致 · {len(values)} 个字段 · {row['id']}",
                           row=row, evidence=evidence, write_receipt=receipt)
@@ -1056,25 +1086,33 @@ class Conversation:
                     urls = _evidence_urls(message) or self._previous_evidence_urls(message)
                     if not urls:
                         return self._ask(plan, task["message"], [], stage)
-                    return self._preview_evidence(urls, _evidence_kinds(EVIDENCE_REFERENCES.sub(" ", message)) or plan["kinds"])
+                    text = EVIDENCE_REFERENCES.sub(" ", message)
+                    scope_text = text if _evidence_kinds(text) else plan.get("paper_clauses") or text
+                    grouped = _kinds_by_paper(scope_text, urls)
+                    if grouped == {}:
+                        return self._ask_evidence_scope(urls, INCOMPLETE_EVIDENCE_SCOPE)
+                    return self._preview_evidence(list(grouped) if grouped else urls,
+                                                  grouped or _evidence_kinds(scope_text) or plan["kinds"],
+                                                  evidence_filter.for_papers(scope_text, urls) or plan.get("filters"))
                 if stage == "evidence_papers":
                     urls = plan["urls"]
                     if message == "全部重新预览":
-                        return self._preview_evidence(urls, plan["kinds"])
+                        return self._preview_evidence(urls, plan["kinds"], plan.get("filters"))
                     positions = paper_positions(message, len(urls), exclude=True)
                     if not positions:
                         return self._ask(plan, task["message"], task["choices"], stage)
-                    return self._preview_evidence([urls[i] for i in positions], plan["kinds"])
+                    return self._preview_evidence([urls[i] for i in positions], plan["kinds"], plan.get("filters"))
                 if stage == "evidence_scope":
                     text = EVIDENCE_REFERENCES.sub(" ", message)
                     explicit = _evidence_urls(message)
                     candidates = explicit or plan["urls"]
+                    filters = evidence_filter.for_papers(text, candidates)
                     grouped = _kinds_by_paper(text, candidates)
                     positions = _preview_positions(text, candidates)
                     if positions == [] and candidates:
-                        return self._ask_evidence_papers(candidates, _evidence_kinds(text) or list(STANDARD_EVIDENCE))
+                        return self._ask_evidence_papers(candidates, _evidence_kinds(text) or list(STANDARD_EVIDENCE), filters)
                     if grouped:
-                        return self._preview_evidence(list(grouped), grouped)
+                        return self._preview_evidence(list(grouped), grouped, filters)
                     urls = [candidates[i] for i in positions] if positions else explicit or self._previous_evidence_urls(
                         message, suggested=True, candidates=plan["urls"] or None)
                     if grouped == {}:
@@ -1093,7 +1131,7 @@ class Conversation:
                         return {"message": "已取消提取。"}
                     if not kinds and re.fullmatch(r"(?:好[的啊]?|可以|全部|都(?:要|看|行)|都看看|先看看)[。！!]?", message):
                         kinds = list(STANDARD_EVIDENCE)
-                    return self._start_evidence(urls, kinds) if kinds else self._ask_evidence_scope(urls)
+                    return self._start_evidence(urls, kinds, filters) if kinds else self._ask_evidence_scope(urls)
                 if stage == "collection_choice":
                     if pending_id != task["id"]:
                         return self._ask(plan, task["message"], task["choices"], stage)

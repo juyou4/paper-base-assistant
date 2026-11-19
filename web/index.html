@@ -35,6 +35,20 @@
           <span>连接中</span>
         </span>
 
+        <details id="connection-panel" class="connection-panel">
+          <summary class="icon-pill connection-trigger">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            </svg>
+            <span>连接与权限</span>
+            <span class="disclosure-chevron" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="m6 9 6 6 6-6"/>
+              </svg>
+            </span>
+          </summary>
+          <div id="connection-info" class="connection-info" aria-live="polite"></div>
+        </details>
         <button type="button" class="icon-pill theme-btn" id="theme-toggle" aria-label="切换深浅色" title="切换深浅色">
           <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
@@ -340,6 +354,9 @@
               <button type="button" class="empty-cta" id="empty-try-btn" hidden><span>存入示例论文</span><svg class="ico-ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M9 7h8v8"/></svg></button>
             </div>
           </div>
+          <div class="records-more-wrap">
+            <button type="button" class="paper-detail-pill" id="more-records" hidden>加载更多论文</button>
+          </div>
         </section>
 
         <!-- 底部双悬浮卡片：写入核验 & 论文依据 -->
@@ -403,6 +420,12 @@
           <div id="history-chats" class="history-list"></div>
         </section>
         <section data-history-section="operations" aria-label="操作历史" hidden>
+          <div class="history-filter-bar">
+            <label class="history-filter-toggle">
+              <span>只看待处理批次</span>
+              <input type="checkbox" class="switch-input" id="history-pending-only">
+            </label>
+          </div>
           <div id="history-operations" class="history-list"></div>
           <button type="button" class="paper-detail-pill" id="history-earlier-operations" hidden>加载更早操作</button>
         </section>
@@ -442,6 +465,7 @@
         <div>
           <h2 id="review-title" tabindex="-1">确认提取结果</h2>
           <p id="review-summary"></p>
+          <p id="review-identity" class="confirmation-identity" hidden></p>
         </div>
         <button type="button" class="icon-pill close-btn" id="review-close" aria-label="关闭预览">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -497,7 +521,7 @@
 
   <dialog id="img-lightbox" class="img-lightbox" aria-label="原图与 PDF 原页预览">
     <div class="lightbox-shell">
-      <button type="button" class="icon-pill close-btn lightbox-close" id="lightbox-close" aria-label="关闭放大预览">
+      <button type="button" class="icon-pill close-btn lightbox-close" id="lightbox-close" aria-label="关闭大图">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M18 6 6 18M6 6l12 12"/>
         </svg>

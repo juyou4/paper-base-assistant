@@ -403,7 +403,7 @@
         </span>
         <div>
           <h1>论文入表助手 · 系统架构</h1>
-          <p>大模型只做理解与归纳，数据解析和写表全由服务端校验执行</p>
+          <p>大模型负责理解口语和归纳摘要，数据解析、权限确认和写表由服务端核对执行</p>
         </div>
       </div>
 
@@ -514,8 +514,8 @@
           <!-- L1 Nodes -->
           <g class="node" data-id="ui-chat">
             <rect class="box" x="34" y="48" width="320" height="58" rx="13" fill="var(--card)" stroke="var(--border-strong)" stroke-width="1.2"/>
-            <text x="50" y="71" fill="var(--ink)" font-size="13" font-weight="650" font-family="var(--font-sans)">对话、进度与历史记忆</text>
-            <text x="50" y="91" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">发指令 · 切模型 · 历史对话 · 操作审计回执</text>
+            <text x="50" y="71" fill="var(--ink)" font-size="13" font-weight="650" font-family="var(--font-sans)">对话、连接权限与历史记忆</text>
+            <text x="50" y="91" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">发指令 · 切模型 · 权限面板 · 只读核验</text>
           </g>
 
           <g class="node" data-id="ui-review">
@@ -523,25 +523,25 @@
             <rect x="654" y="56" width="76" height="20" rx="10" fill="var(--amber-soft)"/>
             <text x="692" y="70" text-anchor="middle" fill="var(--amber)" font-size="10.5" font-weight="650" font-family="var(--font-sans)">人工确认</text>
             <text x="390" y="71" fill="var(--ink)" font-size="13" font-weight="650" font-family="var(--font-sans)">批量确认弹窗</text>
-            <text x="390" y="91" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">多篇切换 · PDF原页放大 · 自选并记住写入列</text>
+            <text x="390" y="91" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">多篇切换 · 原页图放大 · 自选并记住写入列</text>
           </g>
 
           <g class="node" data-id="ui-pdf">
             <rect class="box" x="762" y="48" width="322" height="58" rx="13" fill="var(--card)" stroke="var(--border-strong)" stroke-width="1.2"/>
             <text x="778" y="71" fill="var(--ink)" font-size="13" font-weight="650" font-family="var(--font-sans)">论文清单、对照与导出</text>
-            <text x="778" y="91" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">即时筛选 · 阅读进度 · 多篇对照 · 学术导出</text>
+            <text x="778" y="91" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">跨页筛选 · 阅读进度 · 多篇对照 · 全量备份</text>
           </g>
 
           <!-- L2 Nodes -->
           <g class="node" data-id="http-api">
             <rect class="box" x="34" y="170" width="400" height="50" rx="12" fill="var(--card)" stroke="var(--border-strong)" stroke-width="1.2"/>
-            <text x="50" y="191" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">接口路由与会话隔离</text>
-            <text x="50" y="209" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">app.py · 按浏览器身份隔离对话、偏好与附件</text>
+            <text x="50" y="191" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">接口路由、身份识别与清单分页</text>
+            <text x="50" y="209" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">app.py · execution_context · record_pages（100 条/页）</text>
           </g>
 
           <g class="node" data-id="http-activity">
             <rect class="box" x="454" y="170" width="290" height="50" rx="12" fill="var(--card)" stroke="var(--accent-border)" stroke-width="1.2"/>
-            <text x="470" y="191" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">实时步骤 &amp; 私人历史库</text>
+            <text x="470" y="191" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">实时步骤 &amp; 本地历史库</text>
             <text x="470" y="209" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">activity.py · workspace_history.py</text>
           </g>
 
@@ -556,14 +556,14 @@
             <rect class="box" x="34" y="286" width="240" height="68" rx="13" fill="var(--card)" stroke="var(--border-strong)" stroke-width="1.2"/>
             <text x="50" y="311" fill="var(--ink)" font-size="13" font-weight="650" font-family="var(--font-sans)">多轮对话与记忆控流</text>
             <text x="50" y="330" fill="var(--muted)" font-size="11" font-family="var(--font-mono)">workflow.py · history_ctrl</text>
-            <text x="50" y="345" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">歧义反问 · 续读焦点 · 列偏好</text>
+            <text x="50" y="345" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">追问选列 · 续读论文 · 偏好记忆</text>
           </g>
 
           <g class="node" data-id="orch-search">
             <rect class="box" x="296" y="286" width="248" height="68" rx="13" fill="var(--card)" stroke="var(--border-strong)" stroke-width="1.2"/>
             <text x="312" y="311" fill="var(--ink)" font-size="13" font-weight="650" font-family="var(--font-sans)">收藏回看、对照与导出</text>
             <text x="312" y="330" fill="var(--muted)" font-size="11" font-family="var(--font-mono)">saved_compare · research_exports</text>
-            <text x="312" y="345" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">搜表/查网 · 多篇对比 · Bib/RIS</text>
+            <text x="312" y="345" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">搜表/查网 · 自定义列对照 · 导出</text>
           </g>
 
           <g class="node" data-id="orch-guard">
@@ -576,9 +576,9 @@
           <!-- L4 Nodes -->
           <g class="node" data-id="eng-parse">
             <rect class="box" x="34" y="422" width="240" height="84" rx="13" fill="var(--card)" stroke="var(--border-strong)" stroke-width="1.2"/>
-            <text x="50" y="446" fill="var(--ink)" font-size="13" font-weight="650" font-family="var(--font-sans)">论文解析与资源提取</text>
-            <text x="50" y="465" fill="var(--muted)" font-size="11" font-family="var(--font-mono)">evidence_extract · resources</text>
-            <text x="50" y="482" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">HTML/PDF 表格 · 标出可疑网格</text>
+            <text x="50" y="446" fill="var(--ink)" font-size="13" font-weight="650" font-family="var(--font-sans)">论文解析与点名筛选</text>
+            <text x="50" y="465" fill="var(--muted)" font-size="11" font-family="var(--font-mono)">evidence_extract · filter</text>
+            <text x="50" y="482" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">点名表号/指标/行 · 可疑网格标记</text>
             <text x="50" y="497" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">原图、公式与代码/模型/数据链接</text>
           </g>
 
@@ -586,10 +586,10 @@
             <rect class="box" x="296" y="422" width="248" height="84" rx="13" fill="var(--card)" stroke="var(--accent-border)" stroke-width="1.4"/>
             <rect x="466" y="430" width="68" height="19" rx="9.5" fill="var(--accent-soft)"/>
             <text x="500" y="443" text-anchor="middle" fill="var(--accent)" font-size="10.5" font-weight="650" font-family="var(--font-sans)">并发 + 核验</text>
-            <text x="312" y="446" fill="var(--ink)" font-size="13" font-weight="650" font-family="var(--font-sans)">批量并发与安全提交</text>
-            <text x="312" y="465" fill="var(--muted)" font-size="11" font-family="var(--font-mono)">evidence_workflow · proceedings</text>
-            <text x="312" y="482" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">并发解析 + 会议官方 PDF 容灾缓存</text>
-            <text x="312" y="497" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">偏好套用 · 并发复核 · 记录回执</text>
+            <text x="312" y="446" fill="var(--ink)" font-size="13" font-weight="650" font-family="var(--font-sans)">并发提交与中断恢复</text>
+            <text x="312" y="465" fill="var(--muted)" font-size="11" font-family="var(--font-mono)">evidence_workflow · recovery</text>
+            <text x="312" y="482" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">并发解析 + 会议 PDF 本地缓存</text>
+            <text x="312" y="497" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">写前存摘要 · 只读重核 · 身份校验</text>
           </g>
 
           <g class="node" data-id="eng-admin">
@@ -603,7 +603,7 @@
           <!-- 右侧沙箱：模型推理 -->
           <g class="node" data-id="llm-box">
             <rect class="box" x="814" y="290" width="272" height="214" rx="14" fill="var(--card)" stroke="var(--indigo-border)" stroke-width="1.3"/>
-            <text x="832" y="317" fill="var(--indigo)" font-size="13" font-weight="680" font-family="var(--font-sans)">大模型能力（可自由切换）</text>
+            <text x="832" y="317" fill="var(--indigo)" font-size="13" font-weight="680" font-family="var(--font-sans)">大模型能力（可切换）</text>
             <text x="832" y="336" fill="var(--muted)" font-size="11" font-family="var(--font-mono)">model_support.py · codex_provider.py</text>
 
             <rect x="832" y="352" width="236" height="36" rx="9" fill="var(--card-sub)" stroke="var(--border)"/>
@@ -611,7 +611,7 @@
 
             <rect x="832" y="398" width="236" height="44" rx="9" fill="var(--card-sub)" stroke="var(--border)"/>
             <text x="844" y="417" fill="var(--ink)" font-size="11.5" font-weight="600" font-family="var(--font-sans)">负责：理解口语 · 推荐建表 · 写中文摘要</text>
-            <text x="844" y="434" fill="var(--muted)" font-size="10.8" font-family="var(--font-sans)">只输出限定 JSON，服务端逐项校验</text>
+            <text x="844" y="434" fill="var(--muted)" font-size="10.8" font-family="var(--font-sans)">只输出约定 JSON，服务端逐项校验</text>
 
             <rect x="832" y="452" width="236" height="36" rx="9" fill="var(--indigo-soft)"/>
             <text x="844" y="474" fill="var(--indigo)" font-size="11.3" font-weight="600" font-family="var(--font-sans)">空目录隔离运行 · 不碰密钥和写表</text>
@@ -623,13 +623,13 @@
             <rect x="502" y="588" width="76" height="20" rx="10" fill="var(--accent-soft)"/>
             <text x="540" y="602" text-anchor="middle" fill="var(--accent)" font-size="10.5" font-weight="650" font-family="var(--font-sans)">写后回读</text>
             <text x="52" y="603" fill="var(--ink)" font-size="13.2" font-weight="680" font-family="var(--font-sans)">飞书多维表格（官方 lark-cli / 自建应用）</text>
-            <text x="52" y="623" fill="var(--muted)" font-size="11.2" font-family="var(--font-sans)">table_store.py · 只更新改动列 · 防止重传写重 · 写完按 ID 回读核对</text>
+            <text x="52" y="623" fill="var(--muted)" font-size="11.2" font-family="var(--font-sans)">table_store.py · 只更新改动列 · 请求绑定账号防重 · 写完按 ID 回读</text>
           </g>
 
           <g class="node" data-id="store-sqlite">
             <rect class="box" x="616" y="578" width="468" height="68" rx="13" fill="var(--card)" stroke="var(--border-strong)" stroke-width="1.2"/>
-            <text x="634" y="603" fill="var(--ink)" font-size="13.2" font-weight="680" font-family="var(--font-sans)">本地 SQLite 清单（离线体验 &amp; 独立示例库）</text>
-            <text x="634" y="623" fill="var(--muted)" font-size="11.2" font-family="var(--font-sans)">LocalTable + 本地阅读进度 · 430 项 Python + 5 项 JS 测试保障</text>
+            <text x="634" y="603" fill="var(--ink)" font-size="13.2" font-weight="680" font-family="var(--font-sans)">本地 SQLite 清单（离线体验 &amp; 示例库）</text>
+            <text x="634" y="623" fill="var(--muted)" font-size="11.2" font-family="var(--font-sans)">LocalTable + 自定义列映射 · 446 项 Python + 5 项 JS 测试</text>
           </g>
         </svg>
       </div>
@@ -676,72 +676,72 @@
 
           <g class="node" data-id="s1-pool">
             <rect class="box" x="42" y="188" width="292" height="110" rx="13" fill="var(--card)" stroke="var(--border-strong)" stroke-width="1.2"/>
-            <text x="58" y="212" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">2. 多线程并发解析论文</text>
-            <text x="58" y="232" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">并发抓取，同时保留各自附件与实时进度</text>
+            <text x="58" y="212" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">2. 并发解析与点名筛选</text>
+            <text x="58" y="232" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">多线程抓取，按指定表号、指标和行筛选</text>
             <rect x="58" y="244" width="80" height="22" rx="6" fill="var(--tray)"/>
             <text x="98" y="259" text-anchor="middle" fill="var(--ink-2)" font-size="10.5" font-family="var(--font-sans)">arXiv HTML</text>
             <rect x="146" y="244" width="82" height="22" rx="6" fill="var(--tray)"/>
             <text x="187" y="259" text-anchor="middle" fill="var(--ink-2)" font-size="10.5" font-family="var(--font-sans)">公开 PDF</text>
             <rect x="236" y="244" width="82" height="22" rx="6" fill="var(--tray)"/>
             <text x="277" y="259" text-anchor="middle" fill="var(--ink-2)" font-size="10.5" font-family="var(--font-sans)">本地 PDF</text>
-            <text x="58" y="286" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">提取指标、图表、公式与代码仓库；容灾缓存</text>
+            <text x="58" y="286" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">提取图表、公式和代码链接，会议稿走缓存</text>
           </g>
           <path class="edge" data-from="s1-pool" data-to="s1-plan" d="M 188 298 L 188 324" fill="none" stroke="var(--line)" stroke-width="1.5" marker-end="url(#f-arr)"/>
 
           <g class="node" data-id="s1-plan">
             <rect class="box" x="42" y="328" width="292" height="84" rx="13" fill="var(--card)" stroke="var(--border-strong)" stroke-width="1.2"/>
-            <text x="58" y="352" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">3. 套用偏好并生成快照（暂不写表）</text>
-            <text x="58" y="372" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">套用本表默认写入列，标出可疑表格与候选资源</text>
-            <text x="58" y="392" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">记下原值与记录 ID，等人工确认后再动表</text>
+            <text x="58" y="352" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">3. 生成预览快照（暂不写表）</text>
+            <text x="58" y="372" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">套用默认写入列，标出可疑网格与候选行</text>
+            <text x="58" y="392" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">绑定执行身份、目标行 ID 与单元格原值</text>
           </g>
 
           <!-- 阶段 2 内部节点 -->
           <g class="node" data-id="s2-tabs">
             <rect class="box" x="414" y="92" width="292" height="76" rx="13" fill="var(--card)" stroke="var(--amber-border)" stroke-width="1.2"/>
-            <text x="430" y="117" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">4. 顶部多篇标签 &amp; 原页放大核对</text>
-            <text x="430" y="137" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">并排切换各篇，可展开 PDF 原页并点击放大</text>
-            <text x="430" y="154" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">可疑网格/外部代码默认不勾选，防误写入</text>
+            <text x="430" y="117" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">4. 多篇切换与原页放大核对</text>
+            <text x="430" y="137" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">标明当前账号和表，支持放大查看原页图</text>
+            <text x="430" y="154" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">可疑网格/外部链接默认不勾，需手选实验行</text>
           </g>
           <path class="edge" data-from="s2-tabs" data-to="s2-edit" d="M 560 168 L 560 194" fill="none" stroke="var(--amber)" stroke-width="1.5" marker-end="url(#f-human)"/>
 
           <g class="node" data-id="s2-edit">
             <rect class="box" x="414" y="198" width="292" height="96" rx="13" fill="var(--card)" stroke="var(--amber-border)" stroke-width="1.2"/>
-            <text x="430" y="222" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">5. 勾选条目与改选/记住写入列</text>
-            <text x="430" y="242" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">支持整篇或单条勾选，按类型快速筛选</text>
+            <text x="430" y="222" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">5. 勾选条目与改选写入列</text>
+            <text x="430" y="242" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">支持整篇或单条勾选，按类型筛选</text>
             <text x="430" y="261" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">可改选写入列并勾选「记住为本表默认」</text>
-            <text x="430" y="279" fill="var(--muted)" font-size="10.8" font-family="var(--font-sans)">自动缓存选择与列设置，刷新页面不丢失</text>
+            <text x="430" y="279" fill="var(--muted)" font-size="10.8" font-family="var(--font-sans)">自动缓存勾选状态，刷新页面不丢失</text>
           </g>
           <path class="edge" data-from="s2-edit" data-to="s2-confirm" d="M 560 294 L 560 324" fill="none" stroke="var(--amber)" stroke-width="1.5" marker-end="url(#f-human)"/>
 
           <g class="node" data-id="s2-confirm">
             <rect class="box" x="414" y="328" width="292" height="84" rx="13" fill="var(--card)" stroke="var(--amber-border)" stroke-width="1.4"/>
-            <text x="430" y="352" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">6. 点击「确认写入」提交</text>
-            <text x="430" y="372" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">把勾选项与改选列配置一并提交服务端</text>
-            <text x="430" y="392" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">重复点击直接返回原结果，不重复写表</text>
+            <text x="430" y="352" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">6. 落盘预期摘要并提交</text>
+            <text x="430" y="372" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">写前先记录逐篇预期字段摘要到本机</text>
+            <text x="430" y="392" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">切换账号立即拦截，防误提交与重复写表</text>
           </g>
 
           <!-- 阶段 3 内部节点 -->
           <g class="node" data-id="s3-drift">
             <rect class="box" x="786" y="92" width="292" height="84" rx="13" fill="var(--card)" stroke="var(--accent-border)" stroke-width="1.3"/>
             <text x="802" y="117" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">7. 写入前复核（防并发冲突）</text>
-            <text x="802" y="137" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">检查目标列合法性，重读表格核对原值</text>
-            <text x="802" y="156" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">若期间被他人修改则暂停写入，保护原数据</text>
+            <text x="802" y="137" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">校验目标列和执行身份，重读核对原值</text>
+            <text x="802" y="156" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">期间若被人改过则停写，保护原数据</text>
           </g>
           <path class="edge" data-from="s3-drift" data-to="s3-write" d="M 932 176 L 932 204" fill="none" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#f-safe)"/>
 
           <g class="node" data-id="s3-write">
             <rect class="box" x="786" y="208" width="292" height="84" rx="13" fill="var(--card)" stroke="var(--accent-border)" stroke-width="1.3"/>
             <text x="802" y="232" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">8. 增量写入飞书多维表格</text>
-            <text x="802" y="252" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">只提交勾选变更的字段，不碰其他列</text>
-            <text x="802" y="271" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">新增带防重标记，网络重试不产生重复行</text>
+            <text x="802" y="252" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">只提交本次勾选的字段，不动其余列</text>
+            <text x="802" y="271" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">新增请求带防重标记，并记住自定义写入列</text>
           </g>
           <path class="edge" data-from="s3-write" data-to="s3-readback" d="M 932 292 L 932 324" fill="none" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#f-safe)"/>
 
           <g class="node" data-id="s3-readback">
             <rect class="box" x="786" y="328" width="292" height="84" rx="13" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
-            <text x="802" y="352" fill="var(--accent)" font-size="12.8" font-weight="700" font-family="var(--font-sans)">9. 回读核对并留存操作回执</text>
-            <text x="802" y="372" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">写完按 ID 回读比对，并保存写入列偏好</text>
-            <text x="802" y="392" fill="var(--ink)" font-size="11.2" font-weight="600" font-family="var(--font-sans)">一致标记「已核验」，写入私人审计回执</text>
+            <text x="802" y="352" fill="var(--accent)" font-size="12.8" font-weight="700" font-family="var(--font-sans)">9. 回读核对、留存回执与中断重核</text>
+            <text x="802" y="372" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">写完按 ID 回读，保存回执与列映射</text>
+            <text x="802" y="392" fill="var(--ink)" font-size="11.2" font-weight="600" font-family="var(--font-sans)">中断后可在操作历史只读核验并重预览</text>
           </g>
         </svg>
       </div>
@@ -765,8 +765,8 @@
     <!-- 底部三大核心设计亮点 -->
     <section class="pillars" aria-label="核心架构特性">
       <article class="pillar">
-        <div class="pillar-head"><i class="dot safe"></i><span>防幻觉、防乱填的三道把关</span></div>
-        <p>论文表格与数据直接从原文解析，不靠模型猜数；写入前核对目标行和原值；写完后按记录 ID 回读逐字段比对。</p>
+        <div class="pillar-head"><i class="dot safe"></i><span>数据解析与写后核对</span></div>
+        <p>论文表格与数值直接从原文解析，不靠模型猜数；写前核对执行身份和原值，写完按记录 ID 回读，中断后可只读重核。</p>
       </article>
       <article class="pillar">
         <div class="pillar-head"><i class="dot llm"></i><span>大模型只读隔离，不碰权限</span></div>
@@ -784,89 +784,89 @@
 
     const META = {
       "ui-chat": {
-        tag: "前端", cls: "", title: "对话、进度与历史记忆弹窗",
-        desc: "支持自然语言对话、切模型、实时展示工具步骤，并在「历史与记忆」里切换对话、查看操作回执与管理本表偏好。",
+        tag: "前端", cls: "", title: "对话、连接权限与历史记忆",
+        desc: "支持自然语言对话、切换模型、实时查看步骤状态，顶栏可展开当前账号权限列表；在「历史与记忆」里切换对话、按只待处理批次筛选并对中断批次做只读核验。",
         files: ["web/app.js", "web/history.js", "web/style.css"]
       },
       "ui-review": {
-        tag: "人工确认", cls: "human", title: "批量确认弹窗（支持原页放大与记忆偏好）",
-        desc: "顶部标签并排切换多篇论文，可展开 PDF 原页并点击全屏放大；支持改选写入列并勾选记住为本表默认。",
+        tag: "人工确认", cls: "human", title: "批量确认弹窗（带身份确认、原页放大与列记忆）",
+        desc: "顶部标明执行账号与目标表，多篇并行切换核对；支持展开 PDF 原页并点击放大、手选实验行或写入列，并可勾选记住为本表默认。",
         files: ["web/index.html", "web/app.js", "web/rich-text.js"]
       },
       "ui-pdf": {
-        tag: "前端", cls: "", title: "论文清单、对照与学术导出",
-        desc: "卡片/表格双视图配合关键词即时筛选、本地阅读进度切换、多篇并排对照，以及 BibTeX/RIS/Markdown/CSV/JSON 导出。",
+        tag: "前端", cls: "", title: "论文清单、对照与导出",
+        desc: "支持百条分页加载、跨页关键词及进度筛选、2 到 4 篇并排对照，以及 BibTeX/RIS/Markdown/CSV 和本地全量 JSON 备份导出。",
         files: ["web/index.html", "web/app.js"]
       },
       "http-api": {
-        tag: "接口层", cls: "", title: "接口路由与会话隔离",
-        desc: "基于 Python 标准库提供接口，按浏览器 Cookie 隔离不同用户的对话历史、表级偏好、阅读进度与本地附件。",
-        files: ["app.py"]
+        tag: "接口层", cls: "", title: "接口路由、身份绑定与清单分页",
+        desc: "基于 Python 标准库提供接口，按浏览器会话与飞书执行身份隔离对话、偏好和附件；/api/records/page 与 /api/records/one 处理大表分页与单条即时回读。",
+        files: ["app.py", "execution_context.py", "record_pages.py"]
       },
       "http-activity": {
-        tag: "可观测 & 记忆", cls: "safe", title: "实时步骤记录 & 私人历史库",
-        desc: "实时记录每一步工具执行耗时；workspace_history.py 在本地独立库按表和浏览器持久化对话、续读焦点、偏好与审计回执。",
+        tag: "步骤与历史", cls: "safe", title: "实时步骤记录 & 本地历史库",
+        desc: "按会话和执行身份实时记录工具调用耗时，并在 workspace-history.sqlite3 中按表保存对话、续读论文、列偏好和批量操作回执。",
         files: ["activity.py", "workspace_history.py"]
       },
       "http-attach": {
-        tag: "附件 & 原页", cls: "", title: "本地 PDF 暂存与原页图渲染",
-        desc: "按文件哈希去重暂存本地 PDF，并为待核对批次按页生成 PNG 原页视图，方便弹窗内直接对照。",
+        tag: "附件与原页", cls: "", title: "本地 PDF 暂存与原页图渲染",
+        desc: "按文件哈希去重暂存本地 PDF，并为当前批次按页生成 PNG 原页视图，方便在确认弹窗里点开核对。",
         files: ["paper_attachments.py", "pdf_page_preview.py"]
       },
       "orch-workflow": {
-        tag: "流程与记忆", cls: "", title: "多轮对话、续读焦点与偏好控制",
-        desc: "遇到多笔记列主动反问，支持关闭重开后按记录 ID 安全续读上次论文，并把已保存的默认写入列带入新预览。",
+        tag: "流程与记忆", cls: "", title: "多轮对话、续读与偏好控制",
+        desc: "多笔记列时主动追问，重开服务后可按记录 ID 续读上次的论文，并把已保存的默认写入列自动带入新预览。",
         files: ["workflow.py", "history_controller.py", "paper_selection.py"]
       },
       "orch-guard": {
-        tag: "防误操作", cls: "", title: "意图识别、护栏与记忆边界",
-        desc: "拦截否定句、假设句与跨表越权请求，历史记录仅还原文字且没有写权限，偏好写入前严格校验可写文本列。",
+        tag: "防误操作", cls: "", title: "意图识别与操作边界",
+        desc: "拦截否定句、假设句和跨账号提交；历史对话仅作文字展示且没有写入权限，写表前严格校验目标列合法性。",
         files: ["intent_guard.py", "agent_router.py", "history_semantics.py"]
       },
       "orch-search": {
-        tag: "科研工作流", cls: "", title: "收藏回看、多篇对照与学术导出",
-        desc: "支持“再看看 RAG”回看单篇、2~4 篇并排字段对照、导出 BibTeX/RIS/Markdown/CSV，以及对话建表切表。",
+        tag: "科研工作流", cls: "", title: "收藏回看、对照与导出",
+        desc: "支持按简称回看单篇、跟踪自定义写入列完成 2 到 4 篇对照、服务端全量 JSON 备份，以及对话建表切表。",
         files: ["saved_paper_dialog.py", "saved_focus.py", "saved_compare.py", "research_exports.py", "title_aliases.py"]
       },
       "eng-parse": {
-        tag: "数据解析", cls: "", title: "论文解析、资源抽取与可疑表标记",
-        desc: "解析 HTML/PDF 表格、公式与原图，抽取出自正文的代码/模型/数据集地址；缺表题或残缺的坐标轴网格会标红默认跳过。",
-        files: ["evidence_extract.py", "paper_resources.py", "math_evidence.py", "pdf_text_tables.py"]
+        tag: "数据解析", cls: "", title: "论文解析、点名筛选与可疑表标记",
+        desc: "解析 HTML/PDF 表格、公式、原图与代码/模型/数据集链接，按用户点名的表号、指标和实验行筛出精确数据；残缺网格会标红默认跳过。",
+        files: ["evidence_extract.py", "evidence_filter.py", "paper_resources.py", "math_evidence.py", "pdf_text_tables.py"]
       },
       "eng-evidence": {
-        tag: "核心保障", cls: "safe", title: "批量并发、容灾缓存与安全提交",
-        desc: "多篇并发解析并缓存会议官方 PDF 指纹做离线容灾；提交前核对原值与写入列白名单，写入后生成逐字段操作回执。",
-        files: ["evidence_workflow.py", "proceedings_cache.py", "preflight.py", "source_library.py"]
+        tag: "提交保障", cls: "safe", title: "并发提交、本地缓存与中断恢复",
+        desc: "并发解析论文并缓存会议官方 PDF；提交前把逐篇预期摘要落盘、核对原值与账号身份；中断后可在操作历史只读核对当前表值，未完成篇目可一键重新预览。",
+        files: ["evidence_workflow.py", "batch_recovery.py", "proceedings_cache.py", "preflight.py", "source_library.py"]
       },
       "eng-admin": {
         tag: "表管理", cls: "", title: "字段与权限管理",
-        desc: "支持列增删改、类型切换以及协作者/高级角色权限调整，全部走预览确认再提交。",
-        files: ["schema_admin.py", "collaborator_admin.py", "role_admin.py", "base_files.py"]
+        desc: "支持字段增删改名、类型转换以及协作者和高级角色权限调整，并向连接面板反馈最近一次成功或拒绝结果。",
+        files: ["schema_admin.py", "collaborator_admin.py", "role_admin.py", "base_files.py", "execution_context.py"]
       },
       "llm-box": {
         tag: "模型推理", cls: "llm", title: "大模型能力（只读隔离）",
-        desc: "支持 Codex CLI、兼容 API 与纯规则模式；模型只输出限定 JSON，不碰密钥和写表权限。",
+        desc: "支持 Codex CLI、兼容 API 与纯规则模式；模型在临时空目录运行，只输出约定 JSON，不碰密钥和写表接口。",
         files: ["model_support.py", "codex_provider.py", "intent_model.py"]
       },
       "store-feishu": {
-        tag: "写后核验", cls: "safe", title: "飞书多维表格适配",
-        desc: "支持官方 lark-cli 与自建应用，增量更新防重传写重，写入后按记录 ID 回读逐项验真。",
-        files: ["table_store.py"]
+        tag: "写后回读", cls: "safe", title: "飞书多维表格适配",
+        desc: "支持官方 lark-cli 与自建应用，增量更新并按执行账号隔离防重记录，写完后按记录 ID 回读比对。",
+        files: ["table_store.py", "execution_context.py"]
       },
       "store-sqlite": {
         tag: "离线后端", cls: "", title: "本地 SQLite 清单、示例与测试",
-        desc: "支持独立示范研读库与本机阅读进度，离线体验完整闭环；配套 430 项 Python + 5 项 JS 自动化测试。",
-        files: ["table_store.py", "demo_library.py", "tests/"]
+        desc: "支持分页查询、阅读进度、自定义列映射与全量 JSON 备份；仓库包含 446 项 Python 单元测试（含浏览器端到端用例）和 5 项前端测试。",
+        files: ["table_store.py", "demo_library.py", "source_library.py", "research_exports.py"]
       },
-      "s1-input": { tag: "阶段 1", cls: "", title: "读表结构并去重", desc: "单批最多 8 篇，先读取当前表字段与已有记录，并去掉重复链接。", files: ["evidence_workflow.py"] },
-      "s1-pool": { tag: "阶段 1", cls: "", title: "多线程并发解析与容灾", desc: "多篇论文并行抓取解析，官网不可达时自动核对本地已存会议 PDF 指纹；同步提取代码与模型链接。", files: ["evidence_workflow.py", "evidence_extract.py", "proceedings_cache.py", "paper_resources.py"] },
-      "s1-plan": { tag: "阶段 1", cls: "", title: "套用偏好并生成快照", desc: "按本表已保存偏好预选写入列，并标记坐标轴残缺表格与外部资源链接为需手动核对，此时零写表。", files: ["evidence_workflow.py", "history_semantics.py"] },
-      "s2-tabs": { tag: "阶段 2", cls: "human", title: "多篇切换与原页放大核对", desc: "弹窗一屏切换多篇论文，支持就地展开 PDF 对应原页图并点击全屏放大核对细节。", files: ["web/app.js", "pdf_page_preview.py"] },
-      "s2-edit": { tag: "阶段 2", cls: "human", title: "勾选条目与改选/记住写入列", desc: "可疑表格与外部资源默认不勾选，可手工勾选、改选写入列并勾选「记住为本表默认」。", files: ["web/app.js", "web/history.js"] },
-      "s2-confirm": { tag: "阶段 2", cls: "human", title: "确认写入提交", desc: "携带批次编号、勾选项与写入列配置提交；重复点击直接返回原结果，不重复写表。", files: ["web/app.js", "app.py", "workflow.py"] },
-      "s3-drift": { tag: "阶段 3", cls: "safe", title: "写入前复核（防并发冲突）", desc: "校验目标列合法性并重读原值，若期间被他人修改则暂停单篇写入，保护原数据。", files: ["evidence_workflow.py"] },
-      "s3-write": { tag: "阶段 3", cls: "safe", title: "增量写入飞书表格", desc: "只提交本次勾选变更的列，新增记录带防重标记，网络重试不会多写一行。", files: ["table_store.py", "evidence_workflow.py"] },
-      "s3-readback": { tag: "阶段 3", cls: "safe", title: "回读核对并保存回执与偏好", desc: "按记录 ID 回读逐字段验真并标为「已核验」，将本次确认详情记入私人操作历史，若开启记忆同步保存默认列。", files: ["evidence_workflow.py", "workspace_history.py", "history_controller.py"] }
+      "s1-input": { tag: "阶段 1", cls: "", title: "读表结构并去重", desc: "单批最多 8 篇，先读取当前表字段和已有记录，并去掉重复链接。", files: ["evidence_workflow.py", "source_library.py"] },
+      "s1-pool": { tag: "阶段 1", cls: "", title: "并发解析与点名筛选", desc: "多线程抓取论文并解析图表、公式和代码链接，按点名表号、指标与行名过滤结果，会议论文优先走本地核验缓存。", files: ["evidence_workflow.py", "evidence_extract.py", "evidence_filter.py", "proceedings_cache.py"] },
+      "s1-plan": { tag: "阶段 1", cls: "", title: "生成预览快照（不写表）", desc: "按本表偏好预选写入列，绑定执行账号、目标记录 ID 和原值；残缺网格、外部链接和多候选行标为需核对。", files: ["evidence_workflow.py", "execution_context.py", "history_semantics.py"] },
+      "s2-tabs": { tag: "阶段 2", cls: "human", title: "多篇切换与原页放大", desc: "确认窗头部标明当前账号和目标表，可并排切换多篇，展开 PDF 原页并点击放大查看细节。", files: ["web/app.js", "pdf_page_preview.py"] },
+      "s2-edit": { tag: "阶段 2", cls: "human", title: "勾选条目与改选写入列", desc: "可疑网格和外部资源默认不勾选，支持手选实验行、改选写入列并勾选「记住为本表默认」。", files: ["web/app.js", "web/history.js"] },
+      "s2-confirm": { tag: "阶段 2", cls: "", title: "落盘摘要并提交", desc: "提交前将逐篇预期摘要存入本地历史库；切换账号会阻止提交并提示重新预览。", files: ["batch_recovery.py", "workflow.py", "app.py"] },
+      "s3-drift": { tag: "阶段 3", cls: "safe", title: "写入前复核（防并发冲突）", desc: "校验目标列合法性与执行身份，重读目标行原值；若期间被人改动则停写，避免覆盖。", files: ["evidence_workflow.py", "execution_context.py"] },
+      "s3-write": { tag: "阶段 3", cls: "safe", title: "增量写入与列映射记忆", desc: "只更新勾选变更的字段，新增请求带防重标记；同时把自定义写入列登记到当前表映射中。", files: ["table_store.py", "evidence_workflow.py", "source_library.py"] },
+      "s3-readback": { tag: "阶段 3", cls: "safe", title: "回读核对与中断只读重核", desc: "按记录 ID 回读核对并保存回执；提交中断时可在操作历史执行只读重核，未完成篇目可一键重新预览。", files: ["evidence_workflow.py", "batch_recovery.py", "workspace_history.py"] }
     };
 
     let activeView = "arch";

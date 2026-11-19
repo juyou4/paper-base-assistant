@@ -20,7 +20,7 @@ function createWorkspaceHistory() {
   let operationCursor = null;
   let extendedOperations = false;
   let renderedTail = "";
-  const loadingPage = {messages: false, operations: false};
+  const loadingPage = {messages: false, operations: false, pending_batches: false};
 
   function dateLabel(value) {
     if (!value) return "";
@@ -28,8 +28,8 @@ function createWorkspaceHistory() {
     return Number.isFinite(time.getTime()) ? dateFormat.format(time) : "";
   }
 
-  function actionButton(text, handler, label = "") {
-    const element = make("button", text, "paper-detail-pill");
+  function actionButton(text, handler, label = "", extraClass = "") {
+    const element = make("button", text, "paper-detail-pill" + (extraClass ? " " + extraClass : ""));
     element.type = "button";
     if (label) element.setAttribute("aria-label", label);
     element.addEventListener("click", handler);
@@ -89,17 +89,31 @@ function createWorkspaceHistory() {
       button.append(make("strong", title), make("small", [active ? "当前对话" : "", dateLabel(item.updated)].filter(Boolean).join(" · ")));
       button.onclick = () => active ? panel.close() : change("open", { target_id: item.id });
       row.append(button, actionButton("删除", () => confirmRemoval("删除“" + title + "”及其中的消息？", "delete",
-        { target_id: item.id }), "删除对话 " + title));
+        { target_id: item.id }), "删除对话 " + title, "history-danger-btn"));
       list.append(row);
     }
     if (!list.childElementCount) list.append(make("p", "本表还没有对话。", "history-empty"));
+  }
+
+  function recordButton(recordId) {
+    const scope = data.scope;
+    const view = state.table_view_id;
+    return actionButton("查看当前记录", async () => {
+      try {
+        const row = await currentRow(recordId, view);
+        if (!ready || state.history_scope !== scope) return setError("数据表已切换，请重新选择操作记录。");
+        panel.close();
+        showDetail(row);
+      } catch (error) { setError(error.message); }
+    });
   }
 
   function renderOperations() {
     const list = byId("history-operations");
     const expanded = new Set(Array.from(list.querySelectorAll("details[open]"), el => el.dataset.id));
     list.replaceChildren();
-    for (const item of data.operations || []) {
+    const pendingOnly = byId("history-pending-only").checked;
+    for (const item of (pendingOnly ? data.pending_batches : data.operations) || []) {
       const details = make("details", undefined, "history-operation");
       details.dataset.id = item.id;
       details.open = expanded.has(item.id);
@@ -113,29 +127,54 @@ function createWorkspaceHistory() {
       chev.innerHTML = ICONS.chevronDown;
       summary.append(heading, status, chev);
       const fields = make("dl");
-      for (const field of item.details || []) {
+      if (item.papers?.length) {
+        const states = {queued: "尚未提交", sent: "已提交，待核对结果", verified: "已核验",
+          failed: "目标校验未通过", unverified: "结果待核验", excluded: "已跳过"};
+        for (const paper of item.papers) {
+          const entry = make("dd", undefined, "batch-paper-status");
+          const stateBadge = make("span", states[paper.state] || paper.state, "batch-state-badge");
+          stateBadge.dataset.paperState = paper.state || "";
+          entry.append(stateBadge);
+          const noteText = paper.observed ? dateLabel(paper.checked) + " · " + paper.observed : paper.note || "";
+          if (noteText) entry.append(make("small", noteText, "batch-paper-note"));
+          for (const selection of paper.selected || []) {
+            const evidence = make("span", selection.label + " · " + selection.value, "batch-paper-evidence");
+            if (safeLink(selection.url || "")) evidence.append(iconLink("出处", safeLink(selection.url), "history-source"));
+            entry.append(evidence);
+          }
+          if (paper.record_id) entry.append(make("small", "记录 ID · " + paper.record_id, "batch-paper-record"));
+          const actions = make("div", undefined, "batch-paper-actions");
+          if (paper.record_id) actions.append(recordButton(paper.record_id));
+          if (paper.state !== "excluded" && paper.verdict !== "match" &&
+                (paper.state !== "verified" || paper.verdict) && paper.retry) {
+            actions.append(actionButton("重新预览此篇", () => {
+              panel.close();
+              const input = byId("prompt");
+              input.value = paper.retry;
+              input.dispatchEvent(new Event("input", {bubbles: true}));
+              input.focus();
+            }));
+          }
+          if (actions.childElementCount) entry.append(actions);
+          fields.append(make("dt", paper.title), entry);
+        }
+        const recheckCell = make("dd", undefined, "batch-recheck-cell");
+        recheckCell.append(actionButton("重新核验（只读）", () => change("recheck_batch", {target_id: item.id})));
+        fields.append(make("dt", "当前表"), recheckCell);
+      }
+      for (const field of item.papers?.length ? [] : item.details || []) {
         const label = make("dt", field.label || "详情");
         const value = make("dd", field.value || "");
         if (/^https?:\/\//i.test(field.url || "") && safeLink(field.url)) {
           value.append(iconLink("打开链接", safeLink(field.url), "history-source"));
         }
-        if (field.record_id) {
-          const scope = data.scope;
-          value.append(actionButton("查看当前记录", async () => {
-            await refreshState();
-            if (!ready || state.history_scope !== scope) return setError("数据表已切换，请重新选择操作记录。");
-            const row = state.rows.find(r => r.id === field.record_id);
-            if (!row) return setError("这条记录已删除或当前身份无法读取。");
-            panel.close();
-            showDetail(row);
-          }));
-        }
+        if (field.record_id) value.append(recordButton(field.record_id));
         fields.append(label, value);
       }
       details.append(summary, fields.childElementCount ? fields : make("p", "该操作没有额外明细。", "history-empty"));
       list.append(details);
     }
-    if (!list.childElementCount) list.append(make("p", "本表还没有操作记录。", "history-empty"));
+    if (!list.childElementCount) list.append(make("p", pendingOnly ? "本表没有待处理批次。" : "本表还没有操作记录。", "history-empty"));
   }
 
   const prefKindSelect = byId("pref-kind-select");
@@ -182,7 +221,7 @@ function createWorkspaceHistory() {
     for (const item of data.preferences || []) {
       const row = make("div", undefined, "history-row");
       row.append(make("span", item.text, "history-pref-text"),
-        actionButton("删除", () => change("delete_preference", { target_id: item.id }), "删除偏好 " + item.text));
+        actionButton("删除", () => change("delete_preference", { target_id: item.id }), "删除偏好 " + item.text, "history-danger-btn"));
       list.append(row);
     }
     if (!list.childElementCount) list.append(make("p", "本表还没有已保存的偏好。", "history-empty"));
@@ -260,7 +299,7 @@ function createWorkspaceHistory() {
   }
 
   async function earlier(kind) {
-    const before = kind === "messages" ? messageCursor : operationCursor;
+    const before = kind === "messages" ? messageCursor : kind === "pending_batches" ? data.more_pending_batches : operationCursor;
     if (!data || before == null || loadingPage[kind] || changing) return;
     const {scope, active_id} = data;
     const query = new URLSearchParams({scope, conversation_id: active_id, before: String(before), kind});
@@ -287,6 +326,11 @@ function createWorkspaceHistory() {
         }
         chat.scrollTop = top + chat.scrollHeight - height;
         messageCursor = result.before ?? null;
+      } else if (kind === "pending_batches" && data.more_pending_batches === before) {
+        const ids = new Set(data.pending_batches.map(o => o.id));
+        data.pending_batches.push(...result.items.filter(o => !ids.has(o.id)));
+        data.more_pending_batches = result.before;
+        renderOperations();
       } else if (kind === "operations" && operationCursor === before) {
         const ids = new Set(data.operations.map(o => o.id));
         data.operations.push(...result.items.filter(o => !ids.has(o.id)));
@@ -346,8 +390,8 @@ function createWorkspaceHistory() {
     byId("preference-save").disabled ||= !byId("preference-input").value.trim();
     byId("history-earlier-messages").hidden = !data || messageCursor == null;
     byId("history-earlier-messages").disabled = locked || loadingPage.messages;
-    byId("history-earlier-operations").hidden = !data || operationCursor == null;
-    byId("history-earlier-operations").disabled = locked || loadingPage.operations;
+    byId("history-earlier-operations").hidden = !data || (byId("history-pending-only").checked ? data.more_pending_batches : operationCursor) == null;
+    byId("history-earlier-operations").disabled = locked || loadingPage.operations || loadingPage.pending_batches;
   }
 
   async function change(action, payload = {}) {
@@ -402,7 +446,8 @@ function createWorkspaceHistory() {
   for (const tab of tabs) tab.onclick = () => showTab(tab.dataset.historyTab);
   byId("history-back").onclick = cancelDecision;
   byId("history-earlier-messages").onclick = () => earlier("messages");
-  byId("history-earlier-operations").onclick = () => earlier("operations");
+  byId("history-earlier-operations").onclick = () => earlier(byId("history-pending-only").checked ? "pending_batches" : "operations");
+  byId("history-pending-only").onchange = () => { renderOperations(); syncControls(); };
   byId("history-accept").onclick = () => { if (decision) change(decision.action, decision.payload); };
   byId("history-new").onclick = () => change("new");
   byId("history-clear").onclick = () => confirmRemoval("清空当前表的全部对话和消息？操作记录仍可查阅。", "clear_history");

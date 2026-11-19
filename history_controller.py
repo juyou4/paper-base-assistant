@@ -3,10 +3,13 @@
 import hashlib
 import re
 import sqlite3
+import uuid
 
 import history_semantics as semantics
 from table_store import TableError
 from workspace_history import WorkspaceHistory
+import batch_recovery
+import execution_context
 
 
 def owner_key(cookie):
@@ -22,8 +25,21 @@ class HistoryController:
         chat.history_owner = owner_key(cookie)
         chat.history_scope = None
         chat.history_conversation_id = None
+        chat.execution_actor = None
+        chat.attachment_owner = cookie
+        chat.browser_owner = cookie
 
     def bind(self, chat):
+        actor = execution_context.ACTIVE.get() or execution_context.actor_for(chat.table)
+        old = chat.execution_actor
+        if old and old["key"] != actor["key"]:
+            from activity import History
+            chat.table_view_id = uuid.uuid4().hex
+            chat.activity = History()
+            chat.last_library_results = None
+        chat.execution_actor = actor
+        chat.attachment_owner = (chat.browser_owner if actor["kind"] == "local" else
+                                 chat.browser_owner + ":" + (actor["key"] or chat.table_view_id))
         scope = semantics.stable_scope(chat, self.mode, self.data_dir)
         if scope != chat.history_scope:
             context = self.store.active_context(chat.history_owner, scope)
@@ -76,7 +92,10 @@ class HistoryController:
         owner, scope, current = chat.history_owner, chat.history_scope, chat.history_conversation_id
         action = body.get("action")
         payload = {k: v for k, v in body.items() if k not in ("scope", "conversation_id", "action")}
-        if action in ("new", "clear_history", "clear_focus") and not payload:
+        if action == "recheck_batch" and set(payload) == {"target_id"} and isinstance(payload["target_id"], str):
+            batch_recovery.recheck(self.store, owner, scope, chat.table, payload["target_id"])
+            state = self.store.snapshot(owner, scope)
+        elif action in ("new", "clear_history", "clear_focus") and not payload:
             if action == "new":
                 state = self.store.new_conversation(owner, scope)
             elif action == "clear_history":
@@ -121,6 +140,12 @@ class HistoryController:
     def _memory_command(self, chat, message):
         if chat.pending:
             return None
+        if (re.search(r"上[一次批回]|刚[刚才]|上一批|最近", message) and
+                re.search(r"核对|核验|复核|查[一下看]|确认.{0,4}(?:结果|状态)", message) and
+                re.search(r"回填|提交|写入|成功|失败|没写|没填|断[了网]|回执|待核验|没完成", message)):
+            unresolved = bool(re.search(r"没(?:有)?(?:成功|写|填|完成)|未(?:成功|提交|完成)|失败|待核验|中断|断[了网]", message))
+            return {"message": batch_recovery.recheck(self.store, chat.history_owner, chat.history_scope, chat.table,
+                                                      unresolved_only=unresolved)}
         if message.rstrip("？?。！!") in ("你记住了什么", "查看我的偏好", "查看本表偏好", "我的记忆设置"):
             state = self.store.active_context(chat.history_owner, chat.history_scope)
             choices = [item["text"] for item in state["preferences"]]
@@ -138,8 +163,11 @@ class HistoryController:
         return None
 
     def respond(self, chat, message, body, request_id, options):
+        old_actor = chat.execution_actor
         self.bind(chat)
         pending_id = body.get("pending_id")
+        if old_actor and old_actor["key"] != chat.execution_actor["key"] and pending_id:
+            raise ValueError("执行身份已切换，旧确认已失效。请用当前身份重新预览。")
         replay = (request_id, body.get("history_scope"), body.get("history_conversation_id"), pending_id, message)
         if chat.history_transition and replay == chat.history_transition[0] and not options:
             return chat.history_transition[1]
@@ -150,25 +178,26 @@ class HistoryController:
         pending = chat.pending or {}
         stage, plan = pending.get("stage"), pending.get("plan")
         display = re.sub(r"^((?:确认(?:回填|写入|提交)|取消回填))\s+[a-f0-9]{32}$", r"\1", message)
-        confirmation = (pending_id and pending_id == pending.get("id") and
-                        re.fullmatch(r"确认(?:提交|回填|写入)?[。！!]?", display))
-        key = "batch-" + pending_id if confirmation and stage == "evidence_confirm" else None
-        if key:
-            self.store.record_operation(owner, scope, thread, request_id, {
-                "key": key, "action": "evidence_fill", "status": "unverified",
-                "summary": "已收到本批确认，等待逐篇提交和回读。", "details": []})
+        batch_id = pending.get("id") if stage == "evidence_confirm" else None
+        key = "batch-" + batch_id if batch_id else None
+        journal = batch_recovery.BatchJournal(self.store, owner, scope, thread, batch_id) if batch_id else None
+        token = batch_recovery.ACTIVE.set(journal)
+        identity_token = execution_context.ACTIVE.set(chat.execution_actor)
         try:
             result = self._memory_command(chat, message) or chat.respond(message, pending_id, request_id, **options)
         except (ValueError, TableError, OSError) as exc:
             operation = semantics.operation_for(message, stage, {}, error=exc, plan=plan)
-            if key and operation:
+            if journal and journal.operation and operation:
                 operation["key"] = key
             self.store.record_turn(owner, scope, thread, request_id, display, str(exc),
                                    semantics.export_focus(chat), [operation] if operation else [])
             raise
+        finally:
+            batch_recovery.ACTIVE.reset(token)
+            execution_context.ACTIVE.reset(identity_token)
         operation = semantics.operation_for(message, stage, result, plan=plan)
-        if operation and pending_id and result.get("evidence_results"):
-            operation["key"] = "batch-" + pending_id
+        if operation and (batch_id or pending_id) and result.get("evidence_results"):
+            operation["key"] = "batch-" + (batch_id or pending_id)
         elif operation and pending_id and not result.get("pending_id") and operation["status"] != "cancelled":
             operation["key"] = "write-" + pending_id
         same_scope = scope == semantics.stable_scope(chat, self.mode, self.data_dir)
@@ -181,6 +210,11 @@ class HistoryController:
             result["message"] = result.get("message", "") + " 本机历史未能保存，请保留本次回执。"
         self.bind(chat)
         result.update(self.ids(chat))
+        confirmation = execution_context.confirmation(chat)
+        if confirmation and result.get("pending_id"):
+            result["confirmation"] = confirmation
+            if "evidence_preview" in result:
+                result["evidence_preview"]["confirmation"] = confirmation
         if not same_scope and result.get("target_changed") and pending_id and not options:
             # 建表提交成功但浏览器未收到响应时，重发同一请求只返回已有回执。
             chat.history_transition = (replay, result)

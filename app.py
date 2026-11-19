@@ -16,13 +16,14 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 import model_support
 import paper_attachments
+import execution_context
 import pdf_page_preview
 import papers
 from history_controller import HistoryController, owner_key
 from table_store import FeishuTable, LarkCliTable, LocalTable, TableError
 from workflow import Conversation, _fields
-from title_aliases import title_alias_terms
 from workspace_actions import target_link
+from record_pages import read_page
 
 
 ROOT = Path(__file__).resolve().parent
@@ -88,12 +89,11 @@ class Application:
             name = chat.table_name if chat else self.name
             bound = bool(getattr(table, "table_id", True))
             link = target_link(table, chat.base_url) if chat else self.feishu_url
-            fields, rows = (table.schema(), table.rows()) if bound else ([], [])
+            fields = table.schema() if bound else []
             titles = [col["name"] for col in _fields(fields, "title")]
             links = [col["name"] for col in _fields(fields, "url")]
-            aliases = {row["id"]: terms for row in rows if (terms := title_alias_terms(
-                next((row["fields"][name] for name in titles if row["fields"].get(name)), "")))}
-            reading = table.reading_progress() if bound and isinstance(table, LocalTable) else None
+            page = read_page(table, titles) if bound else {"rows": [], "reading_progress": None, "title_aliases": {},
+                                                           "page": {"next": "", "total": 0, "query": "", "progress": ""}}
             base_name = chat.base_name if chat else self.base_name
             pending = chat.pending if chat else None
             dialog = None
@@ -103,14 +103,17 @@ class Application:
                     dialog = {"id": pending["id"], "message": reply["message"], "evidence_preview": reply["evidence_preview"]}
                 else:
                     dialog = {k: pending[k] for k in ("id", "message", "choices")}
+                if chat.execution_actor:
+                    dialog["confirmation"] = execution_context.confirmation(chat)
             workspace_pending = dialog if pending and pending["stage"] in {"workspace_name", "workspace_create"} else None
         return {"mode": "local" if self.mode == "local" else "feishu", "table_name": name,
                 "target_bound": bound, "base_name": base_name, "workspace_pending": workspace_pending, "pending_dialog": dialog,
-                "fields": fields, "rows": rows, "reading_progress": reading, "title_aliases": aliases,
+                "fields": fields, **page,
                 "identity_fields": {"titles": titles, "links": links},
                 "sample": {"title": papers.SAMPLE["title"], "url": "https://arxiv.org/abs/" + papers.SAMPLE_ID},
                 "download_url": "/api/sample.pdf", "feishu_url": link,
-                "capabilities": {"model": agent["enabled"], "agent": agent, "activity": True}}
+                "capabilities": {"model": agent["enabled"], "agent": agent, "activity": True},
+                "connection": execution_context.connection(chat) if chat and chat.execution_actor else None}
 
     def close(self):
         for chat, _ in self.sessions.values():
@@ -155,7 +158,22 @@ class Handler(BaseHTTPRequestHandler):
         jar = SimpleCookie()
         jar.load(self.headers.get("Cookie", ""))
         sid = jar.get(f"paper_session_{self.server.server_port}") or jar.get("paper_session")
-        return self.server.app.session(sid.value if sid else None)
+        app = self.server.app
+        cookie, chat = app.session(sid.value if sid else None)
+        actor = execution_context.actor_for(chat.table)
+        execution_context.ACTIVE.set(actor)
+        route = urlsplit(self.path).path
+        if route == "/api/activity":
+            # 跟踪长任务时不能等待执行锁；切号后的旧运行不再展示。
+            if chat.execution_actor and chat.execution_actor["key"] != actor["key"]:
+                raise ValueError("执行身份已切换，请刷新工作台。")
+        elif route != "/api/chat" or not chat.execution_actor or chat.execution_actor["key"] != actor["key"]:
+            with chat.lock:
+                previous = chat.execution_actor
+                app.history.bind(chat)
+                if previous and previous["key"] != actor["key"] and self.command == "POST":
+                    raise ValueError("执行身份已切换，旧操作已失效。请刷新后重新预览。")
+        return cookie, chat
 
     def allowed_host(self):
         addr = self.headers.get("Host", "")
@@ -169,6 +187,13 @@ class Handler(BaseHTTPRequestHandler):
         self.dispatch("POST")
 
     def dispatch(self, method):
+        token = execution_context.ACTIVE.set(None)
+        try:
+            self.dispatch_request(method)
+        finally:
+            execution_context.ACTIVE.reset(token)
+
+    def dispatch_request(self, method):
         run = None
         cookie = None
         agent = None
@@ -185,8 +210,31 @@ class Handler(BaseHTTPRequestHandler):
                     snapshot = app.state(chat)
                     snapshot.update(history_identity)
                     snapshot["table_view_id"] = chat.table_view_id
-                snapshot["attachments"] = paper_attachments.AttachmentLibrary(app.data_dir, cookie).list()
+                snapshot["attachments"] = paper_attachments.AttachmentLibrary(app.data_dir, chat.attachment_owner).list()
                 self.send_json(snapshot, cookie=cookie)
+            elif method == "GET" and route.path == "/api/connection":
+                cookie, chat = self.browser_session()
+                with chat.lock:
+                    self.send_json(execution_context.connection(chat), cookie=cookie)
+            elif method == "GET" and route.path in {"/api/records/page", "/api/records/one"}:
+                cookie, chat = self.browser_session()
+                args = parse_qs(route.query, keep_blank_values=True)
+                with chat.lock:
+                    if args.get("view") != [chat.table_view_id]:
+                        raise ValueError("当前数据表已经切换，请刷新后再查询。")
+                    if route.path.endswith("/one"):
+                        if set(args) != {"view", "id"} or len(args["id"]) != 1 or not 0 < len(args["id"][0]) <= 200:
+                            raise ValueError("请选择当前表中的一条记录。")
+                        row = chat.table.get(args["id"][0])
+                        result = {"row": row, "reading_status": (chat.table.reading_progress().get(row["id"], "待读")
+                                  if isinstance(chat.table, LocalTable) else None)}
+                    else:
+                        if set(args) - {"view", "cursor", "q", "progress"} or any(len(v) != 1 for v in args.values()):
+                            raise ValueError("清单分页条件无效。")
+                        titles = [f["name"] for f in _fields(chat.table.schema(), "title")]
+                        result = read_page(chat.table, titles, args.get("cursor", [""])[0], args.get("q", [""])[0],
+                                           args.get("progress", [""])[0])
+                    self.send_json({**result, "table_view_id": chat.table_view_id}, cookie=cookie)
             elif method == "GET" and route.path == "/api/workspace-history":
                 cookie, chat = self.browser_session()
                 with chat.lock:
@@ -207,7 +255,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.attachment_request(method, route, cookie, chat)
             elif method == "GET" and not route.query and (page_route := pdf_page_preview.ROUTE.fullmatch(route.path)):
                 cookie, chat = self.browser_session()
-                library = paper_attachments.AttachmentLibrary(app.data_dir, cookie)
+                library = paper_attachments.AttachmentLibrary(app.data_dir, chat.attachment_owner)
                 source = pdf_page_preview.evidence_file(chat, library, page_route[1],
                                                         int(page_route[2]), int(page_route[3]))
                 if source is None:
@@ -246,21 +294,27 @@ class Handler(BaseHTTPRequestHandler):
                     with chat.lock:
                         if not isinstance(body, dict) or body.get("table_view_id") != chat.table_view_id:
                             raise ValueError("当前数据表已经切换，请刷新后重选。")
-                        schema = chat.table.schema()
                         if route.path.endswith("/compare"):
                             if set(body) != {"table_view_id", "records"}:
                                 raise ValueError("请选择要比较的论文。")
+                            schema = chat.table.schema()
                             selection = read_selection(chat, schema, body["records"])
                             result = comparison_data(chat.table_name, schema, selection,
-                                                     ["摘要", "方法", "关键数据", "图表", "公式", "资源链接", "笔记"])
+                                                     ["摘要", "方法", "关键数据", "图表", "公式", "资源链接", "笔记"], table=chat.table)
                         else:
-                            from research_exports import export_records
+                            from research_exports import export_records, local_backup
                             if (not isinstance(body.get("format"), str) or set(body) not in (
                                     {"table_view_id", "format"}, {"table_view_id", "format", "records"})):
                                 raise ValueError("请选择导出格式和范围。")
-                            rows = ([item[0] for item in read_selection(chat, schema, body["records"], minimum=1)]
-                                    if "records" in body else chat.table.rows())
-                            result = export_records(chat.table, schema, rows, body["format"], chat.table_name)
+                            if body["format"] == "json":
+                                if "records" in body:
+                                    raise ValueError("本地备份包含整张数据表。")
+                                result = local_backup(chat.table, chat.table_name)
+                            else:
+                                schema = chat.table.schema()
+                                rows = ([item[0] for item in read_selection(chat, schema, body["records"], minimum=1)]
+                                        if "records" in body else chat.table.rows())
+                                result = export_records(chat.table, schema, rows, body["format"], chat.table_name)
                     self.send_json(result, cookie=cookie)
                     return
                 if route.path == "/api/reading-progress":
@@ -297,7 +351,7 @@ class Handler(BaseHTTPRequestHandler):
                 request_id = str(uuid.uuid4()) if body.get("request_id") is None else str(uuid.UUID(str(body["request_id"])))
                 run = chat.activity.begin(request_id)
                 with (run.recording(), chat.lock, model_support.using_model(chat.selected_model),
-                      model_support.trace_calls(include_failed=True) as steps, paper_attachments.session_scope(app.data_dir, cookie)):
+                      model_support.trace_calls(include_failed=True) as steps, paper_attachments.session_scope(app.data_dir, chat.attachment_owner)):
                     agent = {**model_support.agent_info(), "steps": steps}
                     options = {}
                     if "evidence_selection" in body:
@@ -347,7 +401,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def attachment_request(self, method, route, cookie, chat):
         app = self.server.app
-        library = paper_attachments.AttachmentLibrary(app.data_dir, cookie)
+        library = paper_attachments.AttachmentLibrary(app.data_dir, chat.attachment_owner)
         match = ATTACHMENT_ROUTE.fullmatch(route.path)
         try:
             if method == "GET" and match and not match[2]:

@@ -11,6 +11,7 @@ from urllib.parse import quote, urljoin, urlsplit
 
 import papers
 import proceedings_cache
+import evidence_filter
 from paper_resources import html_resource_items, pdf_resource_items
 from math_evidence import FormulaReader, MathNode, formula_item
 
@@ -173,7 +174,7 @@ def _grid(block):
     return headers, grid[header_rows:], safe
 
 
-def _scalar_items(table, all_rows=None, title=""):
+def _scalar_items(table, all_rows=None, title="", scope=None):
     headers, rows = table["headers"], table["rows"]
     counts = Counter(header.casefold() for header in headers)
     def identity(row):
@@ -185,7 +186,7 @@ def _scalar_items(table, all_rows=None, title=""):
             if value and value not in ("-", "–", "—", "/"):
                 names.append((idx, value))
         return names
-    candidates = [(row, identity(row)) for row in reversed(rows)]
+    candidates = [(row, identity(row)) for row in reversed(all_rows if scope and all_rows else rows)]
     duplicates = Counter(tuple(identity(row)) for row in (all_rows or rows))
     terms = set(re.findall(r"[a-z][a-z0-9-]{2,}", title.casefold()))
     def priority(candidate):
@@ -201,9 +202,12 @@ def _scalar_items(table, all_rows=None, title=""):
             header, value = headers[col], row[col]
             if header and counts[header.casefold()] == 1 and NUMBER.fullmatch(value):
                 label = f"{row_name} · {header}"
-                result.append(_item("metric", label, value, table["source"], table["source_url"],
-                                    f"{row_name} | {header} | {value}"))
-            if len(result) >= 6:
+                item = _item("metric", label, value, table["source"], table["source_url"],
+                             f"{row_name} | {header} | {value}", row=row_name, column=header,
+                             locator=table["label"], caption=table["value"])
+                if evidence_filter.matches(item, scope):
+                    result.append(item)
+            if not scope and len(result) >= 6:
                 return result
     return result
 
@@ -230,7 +234,7 @@ def _table_item(label, caption, source, url, headers, rows):
     return _item("table", label, caption, source, url, detail or caption, headers=headers, rows=sample)
 
 
-def _article_evidence(html, url, preferred_table=None, *, include_formulas=False):
+def _article_evidence(html, url, preferred_table=None, *, include_formulas=False, scope=None):
     doc = _Article()
     doc.feed(html)
     doc.close()
@@ -247,12 +251,16 @@ def _article_evidence(html, url, preferred_table=None, *, include_formulas=False
         if matched[1].casefold() in ("table", "表") and block["rows"]:
             headers, rows, safe = _grid(block)
             item = _table_item(label, caption, source, src, headers, rows)
+            if not evidence_filter.matches(item, scope):
+                continue
             if block["invalid"]:
                 item["value"] += f"（解析范围为原表前 {MAX_ROWS} 行）"
-            metrics = _scalar_items(item, rows, doc.title or doc.meta_title) if safe else []
+            metrics = _scalar_items(item, rows, doc.title or doc.meta_title, scope) if safe else []
             tables.append((label == preferred_table, bool(metrics), item, metrics))
         elif matched[1].lower().startswith(("fig", "图")) and not any(f["label"] == label for f in figures):
             item = _item("figure", label, caption, source, src, caption)
+            if not evidence_filter.matches(item, scope):
+                continue
             image = _image_url(url, block["image"])
             if image:
                 item["image_url"] = image
@@ -260,10 +268,10 @@ def _article_evidence(html, url, preferred_table=None, *, include_formulas=False
     tables.sort(key=lambda entry: entry[:2], reverse=True)
     items = []
     # 有标量的内容表优先；留出图与表各自的展示空间。
-    for _, _, table, metrics in tables[:2]:
+    for _, _, table, metrics in (tables if scope else tables[:2]):
         items.append(table)
-        items.extend(metrics[:4])
-    items.extend(figures[:3])
+        items.extend(metrics if scope else metrics[:4])
+    items.extend(figures if scope else figures[:3])
     if include_formulas:
         reader = FormulaReader(url)
         reader.feed(html)
@@ -285,7 +293,7 @@ def _result_sentences(text):
             if 12 <= len(value) <= 380 and RESULT.search(value) and MEASURE.search(value)]
 
 
-def _snapshot(version, *, include_formulas=False):
+def _snapshot(version, *, include_formulas=False, scope=None):
     """两个带版本的公开表格片段，按作者表中的行列抄录。链接直达该版本原始图表。"""
     base = "https://arxiv.org/html/" + version
     if version == "1706.03762v7":
@@ -306,7 +314,8 @@ def _snapshot(version, *, include_formulas=False):
     table = _table_item(table_label, caption, origin + table_label, base + "#" + table_anchor, headers, rows)
     figure = _item("figure", "Figure 1", fig_caption, origin + "Figure 1", base + "#" + figure_anchor,
                    fig_caption, image_url=base + "/" + image)
-    items = [table, *_scalar_items(table)[:4], figure]
+    metrics = _scalar_items(table, scope=scope)
+    items = [table, *(metrics if scope else metrics[:4]), figure]
     if include_formulas:
         if version == "1706.03762v7":
             label, anchor = "公式 (1)", "S3.E1"
@@ -319,7 +328,7 @@ def _snapshot(version, *, include_formulas=False):
     return title, items
 
 
-def _pdf_items(data, pdf_url):
+def _pdf_items(data, pdf_url, scope=None):
     items = []
     for page, content in enumerate(data.split("\f"), 1):
         source = f"原文 PDF 第 {page} 页"
@@ -328,9 +337,11 @@ def _pdf_items(data, pdf_url):
             caption = CAPTION.match(_clean(line))
             if caption and caption[3]:
                 kind = "table" if caption[1].lower() in ("table", "表") else "figure"
-                if sum(i["kind"] == kind for i in items) < 2:
+                if scope or sum(i["kind"] == kind for i in items) < 2:
                     label = caption[1] + " " + caption[2]
-                    items.append(_item(kind, label, caption[3], source + " · " + label, link, caption[0]))
+                    item = _item(kind, label, caption[3], source + " · " + label, link, caption[0])
+                    if evidence_filter.matches(item, scope):
+                        items.append(item)
         for paragraph in re.split(r"\n\s*\n", content):
             for sentence in _result_sentences(paragraph):
                 if sum(i["kind"] == "metric" for i in items) < 4:
@@ -338,7 +349,7 @@ def _pdf_items(data, pdf_url):
     return items
 
 
-def _pdf_grid(cells, label, caption, source, url, title):
+def _pdf_grid(cells, label, caption, source, url, title, scope=None):
     """仅为带明确表头、行标和数值的规则 PDF 网格生成标量。合并单元格按原布局供审阅。"""
     if not 2 <= len(cells) <= MAX_ROWS or not 2 <= len(cells[0]) <= MAX_COLS:
         return []
@@ -351,6 +362,8 @@ def _pdf_grid(cells, label, caption, source, url, title):
     if any(NUMBER.fullmatch(value) for value in headers):
         return []  # 首行像数据行；可能是跨页的无表头残片。
     item = _table_item(label, caption, source, url, headers, data)
+    if not evidence_filter.matches(item, scope):
+        return []
     clear = (all(headers[1:]) and all(cell is not None for row in cells for cell in row)
              and all(row[0] and not NUMBER.fullmatch(row[0]) for row in data)
              and any(NUMBER.fullmatch(value) for value in data[0][1:]))
@@ -360,7 +373,8 @@ def _pdf_grid(cells, label, caption, source, url, title):
         item["review_required"] = "表头、行标或单元格边界不清晰，请对照原页核实数值所属的行列。"
     if item.get("review_required"):
         return [item]
-    return [item, *_scalar_items(item, data, title)[:4]]
+    metrics = _scalar_items(item, data, title, scope)
+    return [item, *(metrics if scope else metrics[:4])]
 
 
 def _nearby_caption(page, box):
@@ -383,9 +397,13 @@ def _pdf_tables(path, paper, text):
         import pdfplumber
     except ImportError:
         return []
-    pages = text.split("\f")[:20]
+    scope = paper.get("evidence_scope")
+    pages = text.split("\f")[:32 if scope else 20]
     candidates = [n for n, page in enumerate(pages, 1) if re.search(r"(?im)^\s*(?:table|表)\s*[A-Z\d]+[.:：]", page)]
-    selected = candidates[:8] or list(range(1, 9))
+    if scope:
+        selected = candidates or list(range(1, len(pages) + 1))
+    else:
+        selected = candidates[:8] or list(range(1, 9))
     result = []
     try:
         with pdfplumber.open(path, pages=selected) as doc:
@@ -399,14 +417,14 @@ def _pdf_tables(path, paper, text):
                     label, caption = _nearby_caption(page, table.bbox)
                     label = label or f"第 {page.page_number} 页表格 {idx}"
                     result.extend(_pdf_grid(table.extract(), label, caption or label,
-                                            source + " · " + label, url, paper["title"]))
-                    if sum(i["kind"] == "table" for i in result) >= 2:
+                                            source + " · " + label, url, paper["title"], scope))
+                    if not scope and sum(i["kind"] == "table" for i in result) >= 2:
                         return result
                 for label, caption, cells in captioned_numeric_tables(page):
                     if any(i["kind"] == "table" and i["source_url"] == url and i["label"] == label for i in result):
                         continue
-                    result.extend(_pdf_grid(cells, label, caption, f"{source} · {label} · {caption}", url, paper["title"]))
-                    if sum(i["kind"] == "table" for i in result) >= 2:
+                    result.extend(_pdf_grid(cells, label, caption, f"{source} · {label} · {caption}", url, paper["title"], scope))
+                    if not scope and sum(i["kind"] == "table" for i in result) >= 2:
                         return result
                 page.close()
     except Exception:
@@ -438,7 +456,7 @@ def _file_evidence(pdf, paper):
     if paper.get("include_resources"):
         structured.extend(pdf_resource_items(text, paper["pdf_url"]))
     covered = {(i["source_url"], i["label"].casefold()) for i in structured if i["kind"] == "table"}
-    captions = [i for i in _pdf_items(text, paper["pdf_url"])
+    captions = [i for i in _pdf_items(text, paper["pdf_url"], paper.get("evidence_scope"))
                 if (i["source_url"], i["label"].casefold()) not in covered]
     if not text.strip() and not structured:
         raise ValueError("未读到 PDF 正文。请检查文件，扫描件请先提供带 OCR 文本层的副本。")
@@ -456,13 +474,13 @@ def _pdf_evidence(paper):
         return _file_evidence(papers.download_pdf(paper, work), paper)
 
 
-def extract_evidence(url: str, *, include_formulas=False, include_resources=False) -> dict:
+def extract_evidence(url: str, *, include_formulas=False, include_resources=False, scope=None) -> dict:
     import paper_attachments
     attachment = paper_attachments.bound_file(url)
     if attachment:
         item, path = attachment
         results = _file_evidence(path, {"pdf_url": item["viewer"], "title": item["title"],
-                                        "include_resources": include_resources})
+                                        "include_resources": include_resources, "evidence_scope": scope})
         for evidence in results:
             evidence["public_source_url"] = item["paper_url"]
             evidence["source"] += " · 用户关联的 PDF · SHA-256 " + item["id"]
@@ -479,15 +497,15 @@ def extract_evidence(url: str, *, include_formulas=False, include_resources=Fals
         try:
             html = papers._read_html(article, 5 * 1024 * 1024)
             preferred = {"1706.03762": "Table 2", "2005.11401": "Table 1"}.get(base_id)
-            title, items = _article_evidence(html, article, preferred, include_formulas=include_formulas)
+            title, items = _article_evidence(html, article, preferred, include_formulas=include_formulas, scope=scope)
             if include_resources:
                 items.extend(html_resource_items(html, article))
         except (OSError, ValueError):
             title, items = "", []
-        if title and items:
+        if title and (items or scope):
             return {"title": title, "url": canonical, "items": items}
         if not include_resources and sample and arxiv in (base_id, sample):
-            title, items = _snapshot(sample, include_formulas=include_formulas)
+            title, items = _snapshot(sample, include_formulas=include_formulas, scope=scope)
             return {"title": title, "url": "https://arxiv.org/abs/" + sample, "items": items}
     library = paper_attachments.ACTIVE.get()
     saved = None
@@ -503,8 +521,8 @@ def extract_evidence(url: str, *, include_formulas=False, include_resources=Fals
         if not saved:
             raise
         paper, path = saved
-    if include_resources:
-        paper = {**paper, "include_resources": True}
+    if include_resources or scope:
+        paper = {**paper, "include_resources": include_resources, "evidence_scope": scope}
     if saved:
         items = _file_evidence(path, paper)
         if any(i.get("pdf_sha256") != paper["sha256"] for i in items):

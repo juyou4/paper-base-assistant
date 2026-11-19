@@ -45,9 +45,59 @@ def stored_metadata(table, row, anchor):
         return json.loads(hit[0]) if hit else {}
 
 
+def remember_evidence_columns(table, schema, items):
+    columns = {f["name"]: f["id"] for f in schema if f["type"] == "text"}
+    pairs = {(columns[i["field"]], i["kind"]) for i in items if i["field"] in columns}
+    with table._lock, table._db:
+        table._db.execute("""CREATE TABLE IF NOT EXISTS library_evidence_columns (
+            scope TEXT NOT NULL, field_id TEXT NOT NULL, kind TEXT NOT NULL,
+            PRIMARY KEY(scope,field_id,kind))""")
+        table._db.executemany("INSERT OR IGNORE INTO library_evidence_columns VALUES(?,?,?)",
+                              [(_scope(table), field_id, kind) for field_id, kind in pairs])
+
+
+def evidence_columns(table):
+    with table._lock:
+        if not table._db.execute("SELECT 1 FROM sqlite_master WHERE name='library_evidence_columns'").fetchone():
+            return {}
+        result = {}
+        for field, kind in table._db.execute("SELECT field_id,kind FROM library_evidence_columns WHERE scope=?",
+                                              (_scope(table),)):
+            result.setdefault(field, set()).add(kind)
+        return result
+
+
 def existing_source(table, urls, rows=None):
     match = existing_record(table, urls, rows)
     return match[1] if match else None
+
+
+def local_candidates(table, urls, paper_title, schema, expected=None):
+    """按旧绑定、作品标识或同名行定位，只从 SQLite 取回候选记录的完整内容。"""
+    from table_store import _PAPER_TITLES
+    keys = set().union(*(_keys(url) for url in urls))
+    identities = {_identity(url) for url in urls}
+    titles = {n.casefold() for n in _PAPER_TITLES}
+    links = {n.casefold() for n in _PAPER_LINKS}
+    names = {f["name"] for f in schema if f["name"].casefold() in titles | links}
+    def match(name, value):
+        if name not in names or not isinstance(value, str) or not value:
+            return False
+        if name.casefold() in titles:
+            return value.strip().casefold() == paper_title.strip().casefold()
+        return _identity(value) in identities or bool(_keys(value) & keys)
+    with table._lock:
+        _registry(table)
+        table._db.create_function("matches_evidence_source", 2, match)
+        try:
+            found = table._db.execute("""SELECT id,cells FROM demo_papers AS p WHERE id=? OR
+                paper_key IN (SELECT value FROM json_each(?)) OR id IN
+                (SELECT record_id FROM library_sources WHERE scope=? AND source_key IN (SELECT value FROM json_each(?)))
+                OR EXISTS (SELECT 1 FROM json_each(p.cells) j WHERE matches_evidence_source(j.key,j.value))""",
+                (expected, json.dumps(list(identities)), _scope(table), json.dumps(list(keys)))).fetchall()
+        finally:
+            table._db.create_function("matches_evidence_source", 2, None)
+        return [{"id": r["id"], "fields": json.loads(r["cells"])} for r in found]
 
 
 def existing_record(table, urls, rows=None):

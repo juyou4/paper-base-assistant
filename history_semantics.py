@@ -27,6 +27,9 @@ def stable_scope(chat, mode, data_dir):
         parts = ["local", path, table.table_id]
     else:
         parts = ["feishu", table.app_token, table.table_id]
+        actor = getattr(chat, "execution_actor", None)
+        if actor:
+            parts.extend([actor["kind"], actor["key"] or chat.table_view_id])
         if not table.table_id:
             parts.extend([mode, os.path.normcase(str(Path(data_dir).resolve()))])
     return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode("utf-8")).hexdigest()

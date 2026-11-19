@@ -7,10 +7,12 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
 from activity import step
+from batch_recovery import ACTIVE as ACTIVE_JOURNAL
+import evidence_filter
 from paper_resources import KINDS as RESOURCE_KINDS, LABELS as RESOURCE_LABELS, valid_resource
 from papers import _find_target
 from preflight import _same_article
-from source_library import existing_source, remember
+from source_library import existing_source, local_candidates, remember, remember_evidence_columns
 from table_store import FeishuTable, LocalTable, TableError, TargetChanged, _check_fields, _identity
 
 
@@ -98,7 +100,7 @@ def _locate(table, schema, link, title, url, paper_title, rows):
         raise ValueError("同一论文链接对应多条记录，请先核对重复行。")
     if isinstance(table, FeishuTable):
         types = {f["name"]: f["type"] for f in schema}
-        row = table._locate(key, types, {link: url}, check_duplicates=True)
+        row = table._locate(key, types, {link: url}, check_duplicates=True, rows=rows)
     elif isinstance(table, LocalTable):
         found = table._db.execute("SELECT id FROM demo_papers WHERE paper_key=?", (key,)).fetchone()
         row = table.get(found["id"]) if found else None
@@ -178,9 +180,11 @@ def _prepare_one(table, url, entry, schema, rows, preferences=None):
             "all_schema": all_schema, "request_id": uuid.uuid4().hex}
 
 
-def _extract_one(number, entry, requested, key, wanted, extract_fn):
+def _extract_one(number, entry, requested, key, wanted, extract_fn, scope=None):
     with step(f"提取第 {number} 篇论文的原文证据", tool="论文解析"):
         options = {}
+        if scope:
+            options["scope"] = scope
         if "formula" in wanted:
             options["include_formulas"] = True
         if any(kind in RESOURCE_KINDS for kind in wanted):
@@ -196,7 +200,28 @@ def _extract_one(number, entry, requested, key, wanted, extract_fn):
             entry["source_version"] = paper["source_version"]
         if not entry["title"]:
             raise ValueError("论文缺少可核验的标题。")
-        entry["items"] = [dict(item) for item in paper["items"] if item["kind"] in wanted]
+        items = [dict(item) for item in paper["items"] if item["kind"] in wanted and evidence_filter.matches(item, scope)]
+        if scope:
+            label = evidence_filter.describe(scope)
+            located = {ref for item in items for ref in evidence_filter.refs(item.get("locator") or item["source"])}
+            if any((kind, n) not in located for kind in ("tables", "figures") for n in scope.get(kind, ())):
+                raise ValueError(f"所指定的「{label}」在本次解析的原文中没有全部定位，请核对编号或实验条件。")
+            if not items or "metric" in wanted and not any(i["kind"] == "metric" for i in items):
+                raise ValueError(f"在本次解析的原文范围内找不到符合「{label}」的证据，请核对图表编号、指标或实验条件。")
+            if len(items) > 60:
+                raise ValueError(f"「{label}」匹配超过 60 项，请指定模型行、数据集或指标后再预览。")
+            metrics = [item for item in items if item["kind"] == "metric"]
+            requested = evidence_filter.requested_metrics(scope)
+            covered = set().union(*(evidence_filter.metric_tags(item) for item in metrics))
+            if requested - covered:
+                missing = evidence_filter.describe({"metrics": sorted(requested - covered)})
+                raise ValueError(f"本次解析没有定位到所要求的「{missing}」，请核对指标名称或重新指定范围。")
+            if len(metrics) > 1:
+                for item in metrics:
+                    item["review_required"] = "符合条件的实验单元格有多项，请核对模型行和指标列，勾选需要的数值。"
+        entry["items"] = items
+        if scope:
+            entry["scope"] = scope
         if "formula" in wanted and not any(item["kind"] == "formula" for item in entry["items"]):
             note = "未取得可核对的公式源码。可打开论文原页核对，扫描页公式需要数学 OCR。"
             if not entry["items"]:
@@ -233,7 +258,7 @@ def _extract_one(number, entry, requested, key, wanted, extract_fn):
         return paper
 
 
-def prepare(table, urls, kinds=None, *, preferences=None):
+def prepare(table, urls, kinds=None, *, preferences=None, filters=None):
     """返回仅驻留服务端的确认计划和浏览器可见的逐篇预览。"""
     from evidence_extract import extract_evidence
 
@@ -247,7 +272,8 @@ def prepare(table, urls, kinds=None, *, preferences=None):
         raise ValueError("请指定关键数据、图、表、公式或论文资源链接。")
     tool = getattr(table, "tool_name", None)
     with step("读取回填目标字段和现有记录", tool=tool):
-        schema, rows = table.schema(), table.rows()
+        schema = table.schema()
+        shared_rows = table.identity_rows({f["name"]: f["type"] for f in schema}) if isinstance(table, FeishuTable) else None
     entries, jobs, seen = [], [], set()
     for idx, ref in enumerate(urls):
         entry = {"url": ref, "title": ref, "items": [], "status": "skipped"}
@@ -267,7 +293,8 @@ def prepare(table, urls, kinds=None, *, preferences=None):
     def _run(job):
         idx, number, requested, key, wanted = job
         try:
-            return idx, _extract_one(number, entries[idx], requested, key, wanted, extract_evidence), None
+            scope = (filters or {}).get(urls[idx], (filters or {}).get("*"))
+            return idx, _extract_one(number, entries[idx], requested, key, wanted, extract_evidence, scope), None
         except (ValueError, TableError, OSError) as error:
             return idx, None, error
 
@@ -296,6 +323,8 @@ def prepare(table, urls, kinds=None, *, preferences=None):
         try:
             with step(f"核对第 {number} 篇论文的目标行与列", tool=tool), table._lock:
                 aliases = list(dict.fromkeys([requested, entry["url"], *paper.get("aliases", [])]))
+                rows = (local_candidates(table, aliases, entry["title"], schema)
+                        if isinstance(table, LocalTable) else shared_rows if shared_rows is not None else table.rows())
                 keys = {_paper_key(address) for address in aliases}
                 if prepared_keys & keys:
                     raise ValueError("本批次中已出现同一篇论文。")
@@ -323,7 +352,12 @@ def _check_target(table, entry, draft):
     schema = table.schema()
     if any(field not in schema for field in draft["schema"]):
         raise ValueError("目标列已变更，请重新预览。")
-    rows = table.rows()
+    if isinstance(table, LocalTable):
+        rows = local_candidates(table, draft["aliases"], entry["title"], schema, draft["record_id"])
+    elif isinstance(table, FeishuTable):
+        rows = table.identity_rows({f["name"]: f["type"] for f in schema})
+    else:
+        rows = table.rows()
     anchor = existing_source(table, draft["aliases"], rows=rows)
     if anchor and _identity(anchor) != _identity(draft["target_url"]):
         raise ValueError("已收藏论文的目标链接在预览后发生变化，请重新核对。")
@@ -421,6 +455,9 @@ def commit(table, plan, selection=None, field_overrides=None):
                     raise ValueError("请在预览中核对原文，逐项勾选要保存的资源候选或需核对原页的表格。")
                 selection = defaults
         drafts = _selected_drafts(plan, selection, field_overrides=field_overrides)
+        journal = ACTIVE_JOURNAL.get()
+        if journal:
+            journal.start(plan["entries"], drafts)
         results = []
         for number, (entry, draft) in enumerate(zip(plan["entries"], drafts), 1):
             result = {"title": entry["title"], "url": entry["url"]}
@@ -436,17 +473,23 @@ def commit(table, plan, selection=None, field_overrides=None):
                     _check_target(table, entry, draft)
             except (ValueError, TableError, OSError) as error:
                 result.update(status="failed", message=str(error))
+                if journal:
+                    journal.mark(number, "failed", note=str(error))
                 continue
             try:
                 record_id = draft["record_id"]
                 write_action = "unchanged"
                 if draft["patch"]:
+                    if journal:
+                        journal.mark(number, "sent", record_id)
                     with step(f"提交第 {number} 篇论文的已确认字段", tool=tool):
                         write = table.upsert(draft["key"], draft["patch"], draft["request_id"],
                                              update_only=record_id is not None, expected_record_id=record_id,
                                              expected_fields=draft["before"])
                         record_id = write["record_id"]
                         write_action = write["action"]
+                        if journal:
+                            journal.mark(number, "sent", record_id)
                 result["record_id"] = record_id
                 with step(f"回读第 {number} 篇论文的字段值", tool=tool):
                     saved = table.get(record_id)
@@ -455,6 +498,7 @@ def commit(table, plan, selection=None, field_overrides=None):
                         raise ValueError("回读记录或字段值与确认内容不符。")
                     remember(table, saved, {**draft.get("bibliography", {}), "url": draft["target_url"]}, draft["aliases"])
                 chosen = draft.get("chosen_items", entry["items"])
+                remember_evidence_columns(table, draft["schema"], chosen)
                 items = len(chosen)
                 verified_items = [{"field": item["field"], "label": item["label"], "value": item["value"],
                                    "source": item["source"], "url": item.get("public_source_url") or item["source_url"]}
@@ -465,6 +509,8 @@ def commit(table, plan, selection=None, field_overrides=None):
                 result.update(status="failed", message=str(error))
             except (ValueError, TableError, OSError) as error:
                 result.update(status="unverified", message=f"未取得一致的写入回执，请核对表内记录。{error}")
+            if journal:
+                journal.mark(number, result["status"], result.get("record_id"), result["message"])
         verified = sum(item["status"] == "verified" for item in results)
         total = len(results) if selection is None else sum(draft is not None for draft in drafts)
         count = f"{verified}/{total} 篇回读一致"

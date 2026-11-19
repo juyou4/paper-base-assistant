@@ -55,6 +55,10 @@ class _RejectedChange(TableError):
     """已确定目标写入没有执行，修复失败原因后可使用原确认重试。"""
 
 
+class _PermissionDenied(_RejectedChange):
+    """飞书明确拒绝了当前身份的这项资源操作。"""
+
+
 class _TableReadbackPending(TableError):
     """飞书的建表结果尚未完整可见。"""
 
@@ -434,6 +438,22 @@ class LocalTable:
             return [{"id": row["id"], "fields": json.loads(row["cells"])} for row in
                     self._db.execute("SELECT id,cells FROM demo_papers ORDER BY rowid DESC")]
 
+    def page(self, cursor="", size=100):
+        if cursor and (not cursor.isascii() or not cursor.isdecimal() or len(cursor) > 18):
+            raise ValueError("阅读清单的翻页位置无效。")
+        with self._lock:
+            condition = "WHERE rowid < ?" if cursor else ""
+            args = (int(cursor), size + 1) if cursor else (size + 1,)
+            result = self._db.execute(f"SELECT rowid,id,cells FROM demo_papers {condition} ORDER BY rowid DESC LIMIT ?", args).fetchall()
+            rows = [{"id": r["id"], "fields": json.loads(r["cells"])} for r in result[:size]]
+            total = self._db.execute("SELECT COUNT(*) FROM demo_papers").fetchone()[0]
+            return rows, str(result[size-1]["rowid"]) if len(result) > size else "", total
+
+    def request_record_id(self, request_id):
+        with self._lock:
+            row = self._db.execute("SELECT record_id FROM demo_requests WHERE id=?", (request_id,)).fetchone()
+            return row[0] if row else None
+
     def get(self, record_id, *, paper_key=None):
         with self._lock:
             row = self._db.execute("SELECT paper_key,cells FROM demo_papers WHERE id=?", (record_id,)).fetchone()
@@ -499,6 +519,12 @@ class FeishuTable:
     _host = "https://open.feishu.cn/open-apis"
     _timeout = 12
 
+    def request_record_id(self, request_id):
+        with self._lock:
+            row = self._db.execute("SELECT record_id FROM fs_requests WHERE scope=? AND id=?",
+                                   (self._scope, request_id)).fetchone()
+            return row[0] if row else None
+
     def __init__(self, db_path, app_id, app_secret, app_token, table_id):
         if not app_id or not app_secret:
             raise TableError("请设置飞书应用 ID 和应用密钥。")
@@ -525,6 +551,9 @@ class FeishuTable:
                 CREATE TABLE IF NOT EXISTS fs_requests (
                     scope TEXT, id TEXT, fingerprint TEXT NOT NULL, token TEXT NOT NULL,
                     action TEXT NOT NULL, record_id TEXT, done INTEGER DEFAULT 0, PRIMARY KEY(scope,id)
+                );
+                CREATE TABLE IF NOT EXISTS fs_request_actors (
+                    scope TEXT, id TEXT, actor TEXT NOT NULL, PRIMARY KEY(scope,id)
                 );
                 CREATE TABLE IF NOT EXISTS fs_pending_creates (
                     scope TEXT, paper_key TEXT, request_id TEXT NOT NULL, cells TEXT NOT NULL,
@@ -648,13 +677,24 @@ class FeishuTable:
                 self._db.close()
 
     def _request(self, method, path, body=None, query=None, authenticated=True):
-        readonly = method in {"GET", "HEAD"}
+        import execution_context
+        kind = execution_context.access_kind(method, path)
+        readonly = method in {"GET", "HEAD"} or kind == "read_records"
+        actor = execution_context.ACTIVE.get()
+        if authenticated and not readonly and actor is not None:
+            if not actor["key"] or execution_context.actor_for(self)["key"] != actor["key"]:
+                raise _RejectedChange("执行身份已变化或无法核实，请重新连接并生成预览。")
         attempts = 3 if readonly else 1
         deadline = time.monotonic() + self._timeout + 5
         for attempt in range(1, attempts + 1):
             remaining = max(0.1, deadline - time.monotonic())
             try:
-                return self._request_once(method, path, body, query, authenticated, min(self._timeout, remaining))
+                result = self._request_once(method, path, body, query, authenticated, min(self._timeout, remaining))
+                execution_context.observe(self, kind, "success")
+                return result
+            except _PermissionDenied as exc:
+                execution_context.observe(self, kind, "denied", str(exc))
+                raise
             except _TransientError as exc:
                 if not readonly:
                     raise TableError(f"{exc} 本次请求没有自动重发，请先核对操作结果。") from exc
@@ -713,7 +753,7 @@ class FeishuTable:
         if status >= 400 or code != 0:
             if str(code) in {"91403", "1254302", "1063002"}:
                 hint = _permission_hint(method, path, "当前应用")
-                raise _RejectedChange(f"飞书拒绝了本次操作（HTTP {status}，业务码 {code}）。{hint}")
+                raise _PermissionDenied(f"飞书拒绝了本次操作（HTTP {status}，业务码 {code}）。{hint}")
             if str(code) == "99991400" or (status in {408, 429, 502, 503, 504} and code in (None, 0, status)):
                 wait = _retry_delay(reply_headers.get("x-ogw-ratelimit-reset") or reply_headers.get("Retry-After"))
                 raise _TransientError(f"飞书接口暂时限流或网关不可用（HTTP {status}，业务码 {code}）。", wait)
@@ -722,9 +762,11 @@ class FeishuTable:
             raise error(f"飞书请求失败（HTTP {status}，业务码 {code}）。请检查应用权限、目标表权限及字段设置。")
         return answer
 
-    def _items(self, suffix, *, base=None):
+    def _items(self, suffix, *, base=None, fields=None):
         items, seen = [], set()
         query = {"page_size": 100}
+        if fields:
+            query["field_names"] = json.dumps(sorted(fields), ensure_ascii=False)
         deadline = time.monotonic() + 30
         while True:
             if time.monotonic() >= deadline:
@@ -778,6 +820,28 @@ class FeishuTable:
     def rows(self):
         return [_record(row) for row in self._items("/records")]
 
+    def identity_rows(self, types, additional=()):
+        # 超链接可显示任意自定义文字；只取标识列，比对真实 link 而非显示文字。
+        aliases = {name.casefold() for name in _PAPER_LINKS | _PAPER_TITLES | _IDENTIFIERS}
+        names = {n for n, kind in types.items() if kind == "url" or n.casefold() in aliases}
+        names.update(additional)
+        return [_record(row) for row in self._items("/records", fields=names)] if names else []
+
+    def page(self, cursor="", size=100):
+        query = {"page_size": size}
+        if cursor:
+            query["page_token"] = cursor
+        page = self._request("GET", self._base + "/records", query=query)["data"]
+        items = page.get("items")
+        if items is None and page.get("total") == 0 and not page.get("has_more"):
+            items = []
+        if not isinstance(items, list):
+            raise TableError("飞书未返回有效的记录列表。")
+        token = page.get("page_token") if page.get("has_more") else ""
+        if page.get("has_more") and (not isinstance(token, str) or not token or token == cursor):
+            raise TableError("飞书返回的翻页位置无效，请刷新清单。")
+        return [_record(r) for r in items], token, page.get("total")
+
     def _binding(self, key):
         return self._db.execute(
             """SELECT k.record_id, s.field_id, s.identity FROM fs_keys k
@@ -798,7 +862,7 @@ class FeishuTable:
                 raise TableError(f"回读时无法确认论文身份。{error}") from error
         return row
 
-    def _locate(self, key, types, values, *, check_duplicates=False):
+    def _locate(self, key, types, values, *, check_duplicates=False, rows=None):
         known = self._db.execute("SELECT record_id FROM fs_keys WHERE scope=? AND paper_key=?",
                                  (self._scope, key)).fetchone()
         cached = None
@@ -809,11 +873,14 @@ class FeishuTable:
                 self._db.execute("DELETE FROM fs_keys WHERE scope=? AND paper_key=?", (self._scope, key))
         candidates = {n for n in types if n in _PAPER_LINKS or n in _IDENTIFIERS}
         candidates.update(n for n, v in values.items() if _identity(v) == key)
-        rows = self.rows()
+        if rows is None:
+            rows = self.identity_rows(types, candidates)
+        link_fields = candidates
         matches = [row for row in rows if any(
             _identity(row["fields"].get(name, "")) == key for name in candidates)]
         if not matches:
             other_links = {name for name, kind in types.items() if kind == "url"} - candidates
+            link_fields = other_links
             # 允许用「出处」等自定义超链接列；已有其他正式论文标识的行可能只是在引用本文。
             matches = [row for row in rows if not any(row["fields"].get(n) for n in candidates)
                        and any(_identity(row["fields"].get(n, "")) == key for n in other_links)]
@@ -822,7 +889,12 @@ class FeishuTable:
             raise error("飞书表中有多条记录指向这篇论文，请先核对重复记录。")
         if cached and matches and cached["id"] != matches[0]["id"]:
             raise TargetChanged("原先绑定的记录与当前论文链接所在的行不一致，请核对目标行。")
-        return matches[0] if matches else cached
+        if not matches:
+            return cached
+        current = self.get(matches[0]["id"])
+        if not any(_identity(current["fields"].get(n, "")) == key for n in link_fields):
+            raise TargetChanged("读取记录期间论文链接已变化，请重新预览。")
+        return current
 
     @staticmethod
     def _source_field(key, row, schema, hints, binding, *, allow_missing=False):
@@ -880,11 +952,23 @@ class FeishuTable:
 
     def _plan_write(self, key, values, types, request_id, fingerprint, update_only,
                     expected_record_id, expected_fields, bound_name):
+        from execution_context import ACTIVE
+        actor = ACTIVE.get()
+
+        def check_owner(previous_id):
+            if actor is None:
+                return
+            owner = self._db.execute("SELECT actor FROM fs_request_actors WHERE scope=? AND id=?",
+                                     (self._scope, previous_id)).fetchone()
+            if not owner or not actor["key"] or owner["actor"] != actor["key"]:
+                raise TargetChanged("这个请求无法归属当前执行身份，请在原账号中核对回执。")
+
         params = (self._scope, request_id)
         with self._db:
             self._db.execute("BEGIN IMMEDIATE")
             op = self._db.execute("SELECT * FROM fs_requests WHERE scope=? AND id=?", params).fetchone()
             if op:
+                check_owner(request_id)
                 if op["fingerprint"] != fingerprint:
                     raise TableError("这个请求编号已关联到其他内容。请重新提交。")
                 _check_target_id(expected_record_id, None if op["action"] == "created" else op["record_id"])
@@ -893,6 +977,7 @@ class FeishuTable:
             if not update_only:
                 pending = self._db.execute("SELECT * FROM fs_pending_creates WHERE scope=? AND paper_key=?", target).fetchone()
                 if pending:
+                    check_owner(pending["request_id"])
                     if expected_record_id is not _ANY_RECORD:
                         raise TargetChanged("同一篇论文已有未核验的新增请求，请先核对原回执。")
                     return None, pending
@@ -900,6 +985,7 @@ class FeishuTable:
                 older = self._db.execute("""SELECT id FROM fs_requests WHERE scope=? AND fingerprint=?
                     AND action='created' AND done=0 LIMIT 1""", (self._scope, fingerprint)).fetchone()
                 if older:
+                    check_owner(older["id"])
                     if expected_record_id is not _ANY_RECORD:
                         raise TargetChanged("同一篇论文已有未核验的新增请求，请先核对原回执。")
                     return None, {"request_id": older["id"], "cells": json.dumps(values)}
@@ -924,6 +1010,8 @@ class FeishuTable:
                                  (*target, request_id, json.dumps(values, ensure_ascii=False)))
             self._db.execute("INSERT INTO fs_requests VALUES (?,?,?,?,?,?,0)",
                              (*params, fingerprint, str(uuid.uuid4()), action, record_id))
+            if actor and actor["key"]:
+                self._db.execute("INSERT INTO fs_request_actors VALUES (?,?,?)", (*params, actor["key"]))
             return self._db.execute("SELECT * FROM fs_requests WHERE scope=? AND id=?", params).fetchone(), None
 
     def upsert(self, key, values, request_id, *, update_only=False,
@@ -1046,7 +1134,7 @@ class LarkCliTable(FeishuTable):
                 raise RecordNotFound("飞书数据表中已找不到该条记录。")
             if str(code) in {"91403", "1254302", "1063002"}:
                 hint = _permission_hint(method, path, "当前登录用户")
-                raise _RejectedChange(f"飞书 CLI 拒绝了本次操作（退出码 {result.returncode}，业务码 {code}）。{hint}")
+                raise _PermissionDenied(f"飞书 CLI 拒绝了本次操作（退出码 {result.returncode}，业务码 {code}）。{hint}")
             code_text = f"，业务码 {code}" if isinstance(code, int) else ""
             details = err if isinstance(err, dict) else {}
             category, subtype = details.get("type"), details.get("subtype")

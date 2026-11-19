@@ -7,10 +7,11 @@ import io
 import json
 import re
 import unicodedata
+from datetime import datetime, timezone
 
 import paper_sources
 import source_library
-from table_store import _PAPER_LINKS, _PAPER_TITLES, _is_url
+from table_store import LocalTable, _PAPER_LINKS, _PAPER_TITLES, _is_url
 
 
 FORMATS = {
@@ -191,6 +192,19 @@ def _markdown(rows, table_name):
             lines.extend("- <" + s + ">" for s in paper["sources"])
             lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def local_backup(table, table_name):
+    if not isinstance(table, LocalTable):
+        raise ValueError("JSON 备份只适用于当前本地清单。")
+    with table._lock, table._db:
+        table._db.execute("BEGIN")
+        fields = table.schema()
+        progress = table.reading_progress()
+        rows = [{**row, "reading_progress": progress.get(row["id"], "待读")} for row in table.rows()]
+    snapshot = {"table": table_name, "exported_at": datetime.now(timezone.utc).isoformat(), "fields": fields, "rows": rows}
+    return {"content": json.dumps(snapshot, ensure_ascii=False, indent=2), "extension": "json",
+            "mime": "application/json", "count": len(rows)}
 
 
 def export_records(table, schema, rows, fmt, table_name):

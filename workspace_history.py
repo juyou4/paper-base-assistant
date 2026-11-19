@@ -12,7 +12,9 @@ from urllib.parse import parse_qsl, urlsplit
 
 
 _SETTINGS = ("save_history", "use_preferences", "resume_focus")
-_PAGE_SIZES = {"messages": 100, "operations": 40}
+_PAGE_SIZES = {"messages": 100, "operations": 40, "pending_batches": 20}
+_PENDING_PAPER = """((p.state IN ('queued','sent','unverified','failed') AND p.verdict<>'match')
+                    OR p.verdict IN ('conflict','missing','unreadable'))"""
 _SECRET = re.compile(
     r"(?i)(\bbearer\s+|\b(?:[\w-]*api[_-]?key|[\w-]*app[_-]?secret|password|refresh[_-]?token|"
     r"access[_-]?token|authorization)\b[\"']?\s*[:=]\s*[\"']?|"
@@ -52,6 +54,14 @@ CREATE INDEX IF NOT EXISTS operation_list ON operations(space,created DESC);
 _PAGE_INDEXES = """
 CREATE INDEX IF NOT EXISTS turn_pages ON turns(conversation,seq DESC);
 CREATE INDEX IF NOT EXISTS operation_pages ON operations(space,created DESC,id DESC);
+"""
+_BATCH_SCHEMA = """
+CREATE TABLE IF NOT EXISTS batch_papers(
+    operation TEXT NOT NULL REFERENCES operations(id), ordinal INTEGER NOT NULL,
+    request_id TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL, record_id TEXT,
+    expected TEXT NOT NULL, fields TEXT NOT NULL, selected TEXT NOT NULL, retry TEXT NOT NULL, state TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+    observed TEXT NOT NULL DEFAULT '', verdict TEXT NOT NULL DEFAULT '', checked TEXT, PRIMARY KEY(operation,ordinal)
+);
 """
 
 
@@ -125,11 +135,11 @@ class WorkspaceHistory:
         self.path = directory / "workspace-history.sqlite3"
         with closing(self._open()) as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version > 2:
+            if version > 3:
                 raise ValueError("本机工作台历史来自较新的版本。")
-            if version < 2:
+            if version < 3:
                 schema = _SCHEMA if version == 0 else ""
-                db.executescript("BEGIN IMMEDIATE;\n" + schema + _PAGE_INDEXES + "\nPRAGMA user_version=2; COMMIT;")
+                db.executescript("BEGIN IMMEDIATE;\n" + schema + _PAGE_INDEXES + _BATCH_SCHEMA + "\nPRAGMA user_version=3; COMMIT;")
 
     def _open(self):
         db = sqlite3.connect(self.path, timeout=12)
@@ -205,9 +215,21 @@ class WorkspaceHistory:
                     raise ValueError("当前工作区中找不到这个翻页位置。")
                 bounds = " AND (created,id)<(?,?)"
                 args = (space, start["created"], anchor, size + 1)
+            if kind == "pending_batches":
+                bounds += " AND EXISTS(SELECT 1 FROM batch_papers p WHERE p.operation=operations.id AND " + _PENDING_PAPER + ")"
             rows = db.execute("SELECT id,action,status,summary,details,created FROM operations WHERE space=?" +
                               bounds + " ORDER BY created DESC,id DESC LIMIT ?", args).fetchall()
             items = [{**dict(r), "details": json.loads(r["details"])} for r in rows[:size]]
+            if items:
+                by_id = {op["id"]: op for op in items}
+                marks = ",".join("?" for _ in items)
+                for item in db.execute(f"""SELECT operation,ordinal,title,url,fields,selected,retry,record_id,state,note,observed,verdict,checked
+                        FROM batch_papers WHERE operation IN ({marks}) ORDER BY ordinal""", tuple(by_id)):
+                    paper = dict(item)
+                    op = by_id[paper.pop("operation")]
+                    paper["fields"] = json.loads(paper["fields"])
+                    paper["selected"] = json.loads(paper["selected"])
+                    op.setdefault("papers", []).append(paper)
             key = "id"
         cursor = cls._cursor(space, conversation, kind, rows[size - 1][key]) if len(rows) > size else None
         return {"items": items, "before": cursor}
@@ -224,7 +246,7 @@ class WorkspaceHistory:
         if full:
             view["conversations"] = [dict(r) for r in db.execute(
                 "SELECT id,title,updated FROM conversations WHERE space=? ORDER BY updated DESC,rowid DESC", (space,))]
-            for kind, size in (("messages", recent_messages), ("operations", recent_operations)):
+            for kind, size in (("messages", recent_messages), ("operations", recent_operations), ("pending_batches", 20)):
                 page = cls._page(db, space, identity, kind, None, size)
                 view[kind], view["more_" + kind] = page["items"], page["before"]
         return view
@@ -354,3 +376,51 @@ class WorkspaceHistory:
         with self._access(owner, scope) as (db, space):
             self._conversation(db, space, conversation_id)
             self._operation(db, space, conversation_id, _identifier(request_id), 0, operation, _now())
+
+    def start_batch(self, owner, scope, conversation, batch_id, papers):
+        key = "batch-" + batch_id
+        with self._access(owner, scope) as (db, space):
+            self._conversation(db, space, conversation)
+            self._operation(db, space, conversation, batch_id, 0, {
+                "key": key, "action": "evidence_fill", "status": "unverified",
+                "summary": "已收到本批确认，可展开查看逐篇提交状态。"}, _now())
+            event = hashlib.sha256(("event:" + key).encode()).hexdigest()
+            op = db.execute("SELECT id FROM operations WHERE space=? AND event_key=?", (space, event)).fetchone()[0]
+            # 上一次确认若已开始，历史入口只能核验；再次写入须生成新的预览。
+            if db.execute("SELECT 1 FROM batch_papers WHERE operation=?", (op,)).fetchone():
+                raise ValueError("这批已开始提交，请到操作历史核验；需要重新写入时请生成新预览。")
+            db.executemany("""INSERT INTO batch_papers(operation,ordinal,request_id,title,url,record_id,expected,fields,selected,retry,state)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)""", [(op, i, p["request_id"], _display(p["title"], 1024), _link(p["url"]),
+                    p["record_id"], json.dumps(p["expected"]), json.dumps(p["fields"], ensure_ascii=False),
+                    _details(p["selected"]), _display(p["retry"], 2048), p["state"])
+                    for i, p in enumerate(papers, 1)])
+            return op
+
+    def batch_update(self, owner, scope, operation, ordinal, *, state=None, record_id=None, note="", observed=None, verdict=""):
+        with self._access(owner, scope) as (db, space):
+            where = " WHERE operation=? AND ordinal=? AND operation IN (SELECT id FROM operations WHERE space=?)"
+            keys = (_identifier(operation), ordinal, space)
+            if observed is not None:
+                changed = db.execute("UPDATE batch_papers SET observed=?,verdict=?,checked=?,record_id=COALESCE(record_id,?)" + where,
+                                     (_display(observed, 600), verdict, _now(), record_id, *keys))
+            else:
+                changed = db.execute("UPDATE batch_papers SET state=?,note=?,record_id=COALESCE(?,record_id)" + where,
+                                     (state, _display(note, 600), record_id, *keys))
+            if changed.rowcount != 1:
+                raise ValueError("当前工作台找不到这篇提交回执。")
+
+    def batch_items(self, owner, scope, operation=None, *, unresolved_only=False):
+        with self._access(owner, scope) as (db, space):
+            if operation is None:
+                rule = " AND " + _PENDING_PAPER if unresolved_only else ""
+                latest = db.execute("SELECT o.id FROM operations o WHERE space=? AND "
+                    "EXISTS(SELECT 1 FROM batch_papers p WHERE p.operation=o.id" + rule + ") "
+                    "ORDER BY o.created DESC,o.rowid DESC LIMIT 1", (space,)).fetchone()
+                if not latest and unresolved_only:
+                    return []
+                operation = latest[0] if latest else ""
+            records = db.execute("""SELECT p.* FROM batch_papers p JOIN operations o ON p.operation=o.id
+                WHERE o.space=? AND o.id=? ORDER BY ordinal""", (space, operation)).fetchall()
+            if not records:
+                raise ValueError("当前表没有可逐篇核验的这批记录。")
+            return [dict(row) for row in records]

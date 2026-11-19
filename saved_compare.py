@@ -38,7 +38,7 @@ _OTHER = re.compile(r"https?://|网上|全网|外部|查原文|读原文|原文�
 _EVIDENCE = {"关键数据": ("metric",), "图表": ("figure", "table"), "公式": ("formula",),
              "资源链接": ("code", "model", "dataset"),
              "代码链接": ("code",), "模型链接": ("model",), "数据集链接": ("dataset",)}
-_BLOCK = re.compile(r"(?m)^【(?:" + "|".join(_KIND_NAMES.values()) + r")】")
+_BLOCK = re.compile(r"(?m)^【(?:" + "|".join([*_KIND_NAMES.values(), "关键数据"]) + r")】")
 _HELP = "请用《》分别标出 2 至 4 篇已收藏论文的题名或简称，例如“对比我收藏的《论文甲》和《论文乙》的方法和关键数据”。"
 
 
@@ -87,34 +87,45 @@ def _request(message):
     return (hints if all(hints) else [], labels)
 
 
-def _tagged_notes(value, tags):
+def _tagged_notes(value, tags, *, require_source=False):
     blocks = []
     positions = [m.start() for m in _BLOCK.finditer(value)] + [len(value)]
     for start, end in zip(positions, positions[1:]):
         block = value[start:end]
         if block.startswith(tags):
             source = re.search(r"(?m)^出处：[^\r\n]+(?:\r?\n原图：[^\r\n]+)?", block)
+            if require_source and not source:
+                continue
             # 摘录本身可能含空行；已确认的证据段以出处（和可选的原图链接）结束。
             blocks.append(block[:source.end()] if source else re.split(r"\r?\n[ \t]*\r?\n", block, 1)[0].rstrip())
     return "\n\n".join(blocks)
 
 
-def _values(schema, label, row):
+def _values(schema, label, row, mapping=None):
     fields = row["fields"]
     kinds = _EVIDENCE.get(label)
     if kinds:
         notes = set(column_names(schema, "笔记")[2])
         tagged = tuple(f"【{_KIND_NAMES[kind]}】" for kind in kinds if kind in _KIND_NAMES)
+        if "metric" in kinds:
+            tagged += ("【关键数据】",)
         names = {name for kind in kinds for name in _FIELD_NAMES.get(kind, ())} | notes | set(_LABELS[label])
     else:
         names = set(column_names(schema, label)[2])
     values = []
     for column in schema:
         name = column["name"]
-        if name not in names or fields.get(name) is None:
+        if fields.get(name) is None:
             continue
         value = str(fields[name])
-        if kinds and (name in notes or name == "资源链接" and label != "资源链接"):
+        mapped = (mapping or {}).get(column.get("id"), set())
+        if name not in names:
+            if not kinds or column["type"] != "text":
+                continue
+            # 旧记录未登记字段 ID，也可根据带出处的历史证据段恢复。
+            value = _tagged_notes(value, tagged, require_source=True)
+        elif kinds and (name in notes or name == "资源链接" and label != "资源链接"
+                        or mapped and _BLOCK.search(value)):
             # 专用列保存原值；通用笔记只引用已带相应类型标签的原文段落。
             value = _tagged_notes(value, tagged)
         if value.strip():
@@ -141,10 +152,12 @@ def read_selection(chat, schema, references, minimum=2, maximum=4):
     return selected
 
 
-def comparison_data(table_name, schema, selected, labels):
+def comparison_data(table_name, schema, selected, labels, *, table=None):
     from research_exports import markdown_cell
+    from source_library import evidence_columns
+    mapping = evidence_columns(table) if table is not None else {}
     papers = [{"record_id": row["id"], "title": title, "url": url} for row, title, url in selected]
-    fields = [{"label": label, "values": [_values(schema, label, row) for row, _, _ in selected]}
+    fields = [{"label": label, "values": [_values(schema, label, row, mapping) for row, _, _ in selected]}
               for label in labels]
     cells = [["比较项", *[p["title"] or p["url"] for p in papers]],
              ["---"] * (len(papers) + 1), ["论文链接", *[p["url"] or "未保存" for p in papers]]]
@@ -189,7 +202,7 @@ def handle(chat, message):
     selected = [hits[0][1:4] for hits in matches]
     if len({row["id"] for row, _, _ in selected}) < len(selected):
         return {**reply, "message": "多个题名指向当前表的同一条收藏，请指定不同的论文。"}
-    data = comparison_data(chat.table_name, schema, selected, labels)
+    data = comparison_data(chat.table_name, schema, selected, labels, table=chat.table)
     papers = data["papers"]
     lines = [f"「{chat.table_name}」里的 {len(papers)} 篇收藏", *[
         f"{n}. 《{paper['title']}》\n   {paper['url'] or '未保存论文链接'}" for n, paper in enumerate(papers, 1)]]

@@ -359,6 +359,8 @@ const comparedRecords = new Map();
 let hasVisibleRows = false;
 let viewMode = "cards";
 let latestStateRequest = 0;
+let pageRevision = 0;
+let searchTimer = null;
 let retryableRequest = null;
 let sendResetTimer = null;
 let uploadingPdf = false;
@@ -420,6 +422,43 @@ function modelName(agent) {
     .map(value => value.trim())
     .join(" / ");
 }
+
+function confirmationText(info) {
+  return info ? [info.actor, info.base, info.table, info.impact].filter(Boolean).join(" · ") : "";
+}
+
+function renderPermissions(info) {
+  const box = byId("connection-info");
+  box.replaceChildren();
+  if (!info) return;
+  const head = make("div", undefined, "connection-head");
+  head.append(make("strong", info.actor), make("small", [info.base, info.table].filter(Boolean).join(" / ") || "尚未选择数据表"));
+  box.append(head);
+  const list = make("dl", undefined, "connection-rights");
+  const states = {success: "最近成功", denied: "最近被拒绝", unknown: "待飞书核验", local: "本地模式"};
+  for (const right of info.rights) {
+    const status = make("dd", states[right.status] || "待核验", "perm-badge");
+    status.dataset.permStatus = right.status || "unknown";
+    if (right.time) status.title = new Date(right.time).toLocaleString("zh-CN") + (right.reason ? " " + right.reason : "");
+    list.append(make("dt", right.label), status);
+    if (right.status === "denied" && right.reason) list.append(make("dd", right.reason, "permission-reason"));
+  }
+  box.append(list);
+}
+
+const connectionPanel = byId("connection-panel");
+connectionPanel.addEventListener("toggle", async () => {
+  if (!connectionPanel.open) return;
+  byId("connection-info").replaceChildren(make("p", "正在读取权限状态…", "connection-loading"));
+  try { renderPermissions(await api("/api/connection")); }
+  catch (error) { byId("connection-info").replaceChildren(make("p", error.message, "connection-loading")); }
+});
+document.addEventListener("pointerdown", event => {
+  if (connectionPanel.open && !connectionPanel.contains(event.target)) connectionPanel.open = false;
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && connectionPanel.open) connectionPanel.open = false;
+});
 
 function renderConnectionDetails() {
   const status = byId("engine-mode");
@@ -941,7 +980,8 @@ function renderLibraryRows() {
   });
   hasVisibleRows = visible.length > 0;
   const filtered = Boolean(query || (state.reading_progress && byId("reading-filter").value));
-  byId("filter-count").textContent = filtered ? visible.length + " / " + populated.length + " 条" : "";
+  byId("filter-count").textContent = filtered ? "已显示 " + visible.length + " 条匹配" : "";
+  byId("more-records").hidden = !state.page?.next;
   byId("reset-library-filter").hidden = !filtered;
   renderSelection();
   renderCardsView(visible);
@@ -956,6 +996,51 @@ function resetLibraryFilter() {
   byId("library-query").value = "";
   byId("reading-filter").value = "";
   byId("reading-filter")._cselect?.sync(false);
+}
+
+async function loadRecordPage(append = false) {
+  const revision = ++pageRevision;
+  const view = state.table_view_id;
+  if (!view) return;
+  const query = byId("library-query").value.trim();
+  const progress = byId("reading-filter").value;
+  const args = new URLSearchParams({view, q: query, progress, cursor: append ? state.page.next : ""});
+  const button = byId("more-records");
+  button.disabled = true;
+  try {
+    const page = await api("/api/records/page?" + args);
+    if (view !== state.table_view_id || revision !== pageRevision || query !== byId("library-query").value.trim() ||
+        progress !== byId("reading-filter").value) return;
+    const rows = new Map((append ? state.rows : []).map(row => [row.id, row]));
+    for (const row of page.rows) rows.set(row.id, row);
+    state.rows = [...rows.values()];
+    state.page = page.page;
+    state.title_aliases = {...(append ? state.title_aliases : {}), ...page.title_aliases};
+    state.reading_progress = page.reading_progress === null ? null : {...(append ? state.reading_progress : {}), ...page.reading_progress};
+    renderState();
+    renderPdfTray();
+  } catch (error) {
+    if (revision === pageRevision) showToast(error.message, "error");
+  } finally {
+    if (revision === pageRevision) button.disabled = false;
+  }
+}
+
+function filterRecords() {
+  clearTimeout(searchTimer);
+  pageRevision++;
+  byId("more-records").disabled = false;
+  renderLibraryRows();
+  if (state.page?.next || state.page?.query || state.page?.progress) {
+    searchTimer = setTimeout(() => loadRecordPage(), 220);
+  }
+}
+
+async function currentRow(id, view = state.table_view_id) {
+  const data = await api("/api/records/one?" + new URLSearchParams({view, id}));
+  if (view !== state.table_view_id || data.table_view_id !== view) throw new Error("数据表已切换，请重新选择。");
+  if (state.reading_progress && data.reading_status) state.reading_progress[id] = data.reading_status;
+  return data.row;
 }
 
 function paperRef(row) {
@@ -1020,15 +1105,17 @@ function readingTools(row) {
   select.onchange = async () => {
     select.disabled = true;
     select._cselect?.sync(false);
+    const view = state.table_view_id;
     try {
       await api("/api/reading-progress", { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ record_id: row.id, expected: current, status: select.value, ...historyIdentity }) });
+      const fresh = await currentRow(row.id, view);
+      const idx = state.rows.findIndex(item => item.id === row.id);
+      if (idx >= 0) state.rows[idx] = fresh;
+      renderLibraryRows();
+      if (byId("detail").open) showDetail(fresh);
       showToast("阅读进度已保存到本机");
-    } catch (err) { showToast(err.message, "error"); }
-    await refreshState();
-    const fresh = state.rows.find(item => item.id === row.id);
-    if (byId("detail").open && fresh && ready) showDetail(fresh);
-    else if (byId("detail").open) byId("detail").close();
+    } catch (err) { showToast(err.message, "error"); await refreshState(); }
   };
   wrap.append(select);
   const { urlField } = detectPrimaryFields(state.fields);
@@ -1238,7 +1325,9 @@ function renderState() {
   const populatedRows = state.rows.filter(row => Object.values(row.fields || {}).some(hasCellValue));
   const blankCount = state.rows.length - populatedRows.length;
 
-  const rowSummary = blankCount
+  const rowSummary = (state.page?.next || state.page?.query || state.page?.progress)
+    ? ("已载入 " + state.rows.length + " 条" + (Number.isInteger(state.page.total) ? " · 全表 " + state.page.total + " 条" : ""))
+    : blankCount
     ? populatedRows.length + " 条（含 " + blankCount + " 空行）"
     : populatedRows.length + " 条";
   swapInlineText(byId("row-count"), rowSummary);
@@ -1262,6 +1351,9 @@ function renderState() {
 
 async function refreshState(manual = false, retryHistory = true) {
   const token = ++latestStateRequest;
+  pageRevision++;
+  clearTimeout(searchTimer);
+  byId("more-records").disabled = false;
   refreshingState = true;
   controls();
   const refreshBtn = byId("refresh");
@@ -1272,6 +1364,7 @@ async function refreshState(manual = false, retryHistory = true) {
     if (state.table_view_id !== snapshot.table_view_id) {
       choosingComparison = false;
       comparedRecords.clear();
+      resetLibraryFilter();
     }
     state = {
       ...snapshot,
@@ -1291,17 +1384,19 @@ async function refreshState(manual = false, retryHistory = true) {
       for (const ref of comparedRecords.values()) {
         const row = current.get(ref.id);
         const live = row && paperRef(row);
-        if (!live || live.title !== ref.title || live.url !== ref.url) comparedRecords.delete(ref.id);
+        if ((!live && !state.page?.next) || (live && (live.title !== ref.title || live.url !== ref.url))) comparedRecords.delete(ref.id);
       }
     }
     renderPdfTray();
     renderState();
+    if (state.page?.next && (byId("library-query").value.trim() || byId("reading-filter").value)) await loadRecordPage();
     const plan = state.pending_dialog || state.workspace_pending;
     if (plan && plan.id !== pendingId) {
       pendingId = plan.id;
       const previous = byId("chat").lastElementChild;
       const article = previous?.matches("[data-archived].assistant") && previous.textContent === plan.message
         ? previous : appendMessage(plan.message, "assistant").article;
+      if (plan.confirmation && !plan.evidence_preview) article.append(make("p", confirmationText(plan.confirmation), "confirmation-identity"));
       if (plan.evidence_preview) showReviewButton(article, plan.evidence_preview, true);
       else if (plan.choices.length) appendChoices(article, plan.choices, plan.id);
     } else if (!plan && "pending_dialog" in state) {
@@ -1576,7 +1671,7 @@ function reviewItem(item, paperUrl, checkbox, activeField, pageEndpoint) {
   block.append(meta, PaperRichText.render(make("h4"), item.label, true));
   if (item.review_required) {
     const notice = make("p", undefined, "review-uncertain");
-    notice.append(make("strong", "需核对原页"), "　" + item.review_required);
+    notice.append(make("strong", item.kind === "metric" && item.row ? "请选择实验行" : "需核对原页"), "　" + item.review_required);
     checkbox?.setAttribute("aria-description", notice.textContent);
     block.append(notice);
   }
@@ -1740,6 +1835,8 @@ function openEvidenceReview(preview, restored = false) {
   }
   const target = (state.mode === "feishu" ? "飞书" : "本地") + "「" + (state.table_name || "阅读清单") + "」";
   byId("review-summary").textContent = readyPapers.length + "/" + preview.papers.length + " 篇可写入 · " + target;
+  byId("review-identity").textContent = confirmationText(preview.confirmation);
+  byId("review-identity").hidden = !preview.confirmation;
   tabsEl.hidden = !preview.papers.length;
   const tabRefs = [];
   const shortActions = { create: "新增", update: "更新", unchanged: "无变化" };
@@ -2136,6 +2233,7 @@ async function submit(text) {
     }
     if (result.collection?.length) appendCollection(article, result.collection);
 
+    if (result.confirmation && !result.evidence_preview) article.append(make("p", confirmationText(result.confirmation), "confirmation-identity"));
     if (result.evidence_preview?.papers?.length) {
       showReviewButton(article, result.evidence_preview);
     } else if (pendingId && Array.isArray(result.choices) && result.choices.length) {
@@ -2155,6 +2253,7 @@ async function submit(text) {
     }
 
     if (result.saved_record_id) {
+      const resultView = state.table_view_id;
       selectedId = result.saved_record_id;
       const open = make("button", "查看表中记录", "paper-detail-pill open-saved-row");
       open.type = "button";
@@ -2162,11 +2261,12 @@ async function submit(text) {
         if (open.getAttribute("aria-busy") === "true") return;
         open.setAttribute("aria-busy", "true");
         try {
-          await refreshState();
+          const row = await currentRow(result.saved_record_id, resultView);
           if (!ready || open.disabled) return;
-          const row = state.rows.find(item => item.id === result.saved_record_id);
           if (row) showDetail(row);
           else showToast("当前表已找不到这条记录，请重新查询。", "error");
+        } catch (error) {
+          showToast(error.message, "error");
         } finally {
           open.removeAttribute("aria-busy");
         }
@@ -2194,8 +2294,15 @@ async function submit(text) {
       showEvidence(Array.isArray(result.evidence) ? result.evidence : []);
     }
 
-    if (!result.evidence_preview) await refreshState(false);
-    else if (state.history_scope) {
+    const updatedIndex = result.row && result.write_receipt?.change !== "created" &&
+      result.history_scope === state.history_scope ? state.rows.findIndex(row => row.id === result.row.id) : -1;
+    if (updatedIndex >= 0) {
+      state.rows[updatedIndex] = result.row;
+      state.title_aliases[result.row.id] = result.row_aliases || [];
+      renderState();
+      renderPdfTray();
+    } else if (!result.evidence_preview) await refreshState(false);
+    if ((updatedIndex >= 0 || result.evidence_preview) && state.history_scope) {
       if (result.history_scope && result.history_scope !== state.history_scope) await refreshState();
       else if (!await workspaceHistory.sync({...state, ...result})) await refreshState();
     }
@@ -2428,11 +2535,12 @@ window.addEventListener("pageshow", event => {
   if (event.persisted && !busy && !switchingModel) refreshState();
 });
 byId("refresh").addEventListener("click", () => refreshState(true));
-byId("reading-filter").addEventListener("change", renderLibraryRows);
-byId("library-query").addEventListener("input", renderLibraryRows);
+byId("reading-filter").addEventListener("change", filterRecords);
+byId("library-query").addEventListener("input", filterRecords);
+byId("more-records").onclick = () => loadRecordPage(true);
 byId("reset-library-filter").addEventListener("click", () => {
   resetLibraryFilter();
-  renderLibraryRows();
+  filterRecords();
   byId("library-query").focus();
 });
 function recordsRequest(action, body, viewId = state.table_view_id) {
@@ -2464,16 +2572,7 @@ byId("export-format").addEventListener("change", async event => {
   const viewId = state.table_view_id;
   const filename = (state.table_name || "阅读清单").replace(/[<>:"/\\|?*]/g, "_");
   try {
-    let data;
-    if (format === "json") {
-      const snapshot = await api("/api/state");
-      if (snapshot.table_view_id !== viewId || !snapshot.reading_progress) throw new Error("请在当前本地清单重新导出。");
-      const rows = snapshot.rows.map(row => ({...row, reading_progress: snapshot.reading_progress[row.id] || "待读"}));
-      const file = { table: snapshot.table_name, exported_at: new Date().toISOString(), fields: snapshot.fields, rows };
-      data = {content: JSON.stringify(file, null, 2), extension: "json", mime: "application/json", count: rows.length};
-    } else {
-      data = await recordsRequest("export", {format}, viewId);
-    }
+    const data = await recordsRequest("export", {format}, viewId);
     const url = URL.createObjectURL(new Blob([data.content], {type: data.mime}));
     const link = document.createElement("a");
     link.href = url;
