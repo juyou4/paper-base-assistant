@@ -8,3 +8,21 @@ __pycache__/
 *.mp4
 *.webm
 *.pdf
+
+# 测试用例、测试工作流和运行产物仅在本机保留。
+tests/
+test/
+__tests__/
+test_*.py
+*_test.py
+test_*.cjs
+*.test.*
+*.spec.*
+/.github/workflows/test*.yml
+/.github/workflows/test*.yaml
+.pytest_cache/
+.coverage
+htmlcov/
+coverage/
+test-results/
+playwright-report/

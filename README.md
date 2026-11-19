@@ -24,7 +24,7 @@ python app.py --mode local --demo --agent rules --open
 示例复用了批量提取后逐项确认的结果。RAG 保存了 Table 1 的 RAG-Seq. / NQ 数值 44.5，Attention 保存了 Table 2 的 Transformer (big) / EN-DE BLEU 数值 28.4，两篇各保存一张 Figure 1。要从零体验提取与提交，可用普通本地模式或已授权的飞书表。将两条论文链接和“提取这两篇的指标和图表”一起发出，在预览中逐篇勾选，再确认写入。
 
 **真实环境验证**：
-- **论文录入与回读**：已在真实飞书测试表录入《Attention Is All You Need》（方法摘自第 3 节）和 BART。录入 BART 时从 PDF 第 2 页提取了 362 个字符的英文方法段并补入同一条记录，随后用飞书官方 CLI `base +record-get` 按记录 ID 回读，与原文和官网地址一致。[BART 原文第 2 页](https://aclanthology.org/2020.acl-main.703.pdf#page=2) · [Attention 原文第 3 节](https://arxiv.org/html/1706.03762#S3) · [Windows 与 Linux 自动测试](https://github.com/juyou4/paper-base-assistant/actions/workflows/test.yml)
+- **论文录入与回读**：已在真实飞书测试表录入《Attention Is All You Need》（方法摘自第 3 节）和 BART。录入 BART 时从 PDF 第 2 页提取了 362 个字符的英文方法段并补入同一条记录，随后用飞书官方 CLI `base +record-get` 按记录 ID 回读，与原文和官网地址一致。[BART 原文第 2 页](https://aclanthology.org/2020.acl-main.703.pdf#page=2) · [Attention 原文第 3 节](https://arxiv.org/html/1706.03762#S3)
 - **字段与权限操作**：2026 年 11 月 18 日在同一测试表通过对话完成空文本列的新建、按字段 ID 查询、改名回读与删除（字段数 7 → 8 → 7，6 条已有记录的 ID 与其余字段定义未受影响）；协作者和高级角色变更通过本地示例与模拟官方 API 响应验收，未改动真实租户的人员权限。
 
 ![工作台实测截图，展示 Codex 模型、字段查询步骤和本地阅读清单](docs/demo.png)
@@ -283,11 +283,4 @@ flowchart LR
 - `table_store.py` 封装 SQLite、飞书应用和飞书 CLI 三种后端；更新时仅提交本次要求的字段，业务查重拦截重复指令，原生飞书新增请求通过持久化的幂等令牌处理传输重试。
 - `model_support.py` 与 `intent_model.py` 为可选的模型提取及意图识别入口，飞书令牌和模型密钥均留在服务端。
 
-运行后端回归和前端富文本测试：
-
-```sh
-python -m unittest discover -s tests -v
-node --test tests/test_rich_text.cjs
-```
-
-测试覆盖字段歧义、确认与取消、多篇并发提取、自定义写入列与漂移保护、同篇论文更新、模拟飞书回读及重试、模型输出校验、跨会话模型隔离，以及执行进度的实时读取和失败重试。本工具面向单机演示与个人阅读清单管理，默认绑定本机回环地址。
+本工具面向单机演示与个人阅读清单管理，默认绑定本机回环地址。
