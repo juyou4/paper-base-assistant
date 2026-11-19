@@ -1,5 +1,6 @@
-"""解析论文链接、取得原文证据并下载 arXiv 论文。仅依赖 Python 标准库。"""
+"""解析论文来源、取得原文证据并缓存已确认的公开论文。"""
 
+import hashlib
 import json
 import os
 import re
@@ -13,28 +14,39 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import pdf_sections
+import paper_sources
 from math_evidence import MathNode
+from paper_sources import ARXIV_HOSTS, ARXIV_ID, paper_keys
 
 
 SAMPLE = json.loads((Path(__file__).parent / "assets" / "sample_paper.json").read_text(encoding="utf-8"))
 SAMPLE_ID = "2005.11401"
-ARXIV_ID = r"(?:\d{4}\.\d{4,5}|[a-z][a-z0-9.-]*/\d{7})(?:v[1-9]\d*)?"
-ARXIV_HOSTS = {"arxiv.org", "www.arxiv.org", "export.arxiv.org"}
-PAPER_HOSTS = ARXIV_HOSTS | {"aclanthology.org"}
+PAPER_HOSTS = paper_sources.HOSTS
 ACL_PAPER = re.compile(r"/([A-Za-z0-9][A-Za-z0-9.-]{2,90}?)(?:\.pdf|/)?$")
 MAX_PDF = 50 * 1024 * 1024
 
 
 def _trusted_url(url):
-    location = urlsplit(url)
-    return (location.scheme == "https" and location.hostname in PAPER_HOSTS
-            and location.port in (None, 443) and not location.username and not location.password)
+    try:
+        location = urlsplit(url)
+        return (location.scheme == "https" and location.hostname in PAPER_HOSTS
+                and location.port in (None, 443) and location.username is None and location.password is None)
+    except ValueError:
+        return False
 
 
 class _ArxivRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if not _trusted_url(newurl):
             raise ValueError("论文站点将请求重定向到了未支持的来源。")
+        old, new = urlsplit(req.full_url).hostname, urlsplit(newurl).hostname
+        if old != new and not {old, new} <= ARXIV_HOSTS:
+            raise ValueError("论文请求跳转到了其他站点，无法确认原文来源。")
+        old_kind, old_id, _ = paper_sources._identifier(req.full_url)
+        new_kind, new_id, _ = paper_sources._identifier(newurl)
+        if old_kind == new_kind and old_kind not in {"", "url"} and old_id != new_id:
+            if not (old_kind == "arxiv" and re.fullmatch(re.escape(old_id) + r"v\d+", new_id)):
+                raise ValueError("论文来源跳转到了其他稿件或版本，请核对链接。")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -59,6 +71,7 @@ class _PageText(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.meta = {}
+        self.authors = []
         self.blocks = []
         self.tag = ""
         self.parts = []
@@ -68,9 +81,13 @@ class _PageText(HTMLParser):
         self._math = None
         self._sections = []
         self.heading_anchors = {}
+        self.arxiv_citation = ""
+        self._anchor = None
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
+        if tag == "a":
+            self._anchor = (attrs.get("href", ""), [])
         if self._math is not None:
             self._math.start(tag, attrs)
             return
@@ -85,6 +102,8 @@ class _PageText(HTMLParser):
             self._in_abstract = True
         if tag == "meta":
             self.meta[attrs.get("name") or attrs.get("property")] = attrs.get("content", "")
+            if attrs.get("name") == "citation_author" and attrs.get("content"):
+                self.authors.append(attrs["content"])
         if re.fullmatch(r"h[1-6]", tag) or tag in ("p", "blockquote"):
             self.tag = tag
             self.parts = []
@@ -94,6 +113,14 @@ class _PageText(HTMLParser):
                     self.heading_anchors[len(self.blocks)] = anchor
 
     def handle_endtag(self, tag):
+        if tag == "a" and self._anchor:
+            href, parts = self._anchor
+            label = "".join(parts).strip()
+            if re.fullmatch(r"arXiv:" + ARXIV_ID, label, re.I):
+                ident = label.split(":", 1)[1]
+                if paper_sources._identifier(href)[:2] == ("arxiv", ident.lower()):
+                    self.arxiv_citation = ident.lower()
+            self._anchor = None
         if self._math is not None:
             if tag == "math":
                 marked = self._math.marked_text()
@@ -114,6 +141,8 @@ class _PageText(HTMLParser):
             self.parts = []
 
     def handle_data(self, data):
+        if self._anchor:
+            self._anchor[1].append(data)
         if self._math is not None:
             self._math.text(data)
             return
@@ -165,10 +194,12 @@ def _find_target(text):
     text = str(text).strip()
     match = re.search(r"https?://[^\s<>\"'\x60，。；、！？（）【】\u4e00-\u9fff]+", text, re.I)
     if match:
-        url = match[0].rstrip(".,;:!?)]}")
+        url = _trim_address(match[0])
         location = urlsplit(url)
         if not location.hostname or location.username or location.password:
             raise ValueError("请提供不含登录信息的论文链接。")
+        if paper_sources._identifier(url)[0] == "arxiv":
+            return paper_sources._identifier(url)[1], ""
         if location.hostname.lower() in ARXIV_HOSTS:
             path = location.path.removesuffix(".pdf").rstrip("/")
             arxiv = re.fullmatch(rf"/(?:abs|pdf|html)/({ARXIV_ID})", path, re.I)
@@ -176,13 +207,32 @@ def _find_target(text):
                 raise ValueError("请提供 arXiv 摘要页、PDF 链接或论文编号。")
             return arxiv[1], ""
         return "", urlunsplit((location.scheme, location.netloc, location.path, location.query, ""))
+    doi = re.search(r"(?<![A-Za-z0-9])10\.\d{4,9}/[^\s<>\"'`，。；、！？（）【】\u4e00-\u9fff]+", text, re.I)
+    if doi and (identifier := paper_sources._doi(_trim_address(doi[0]))):
+        return _find_target(paper_sources.doi_url(identifier))
     bare = re.fullmatch(ARXIV_ID, text, re.I)
     if bare:
         return bare[0], ""
     found = re.search(rf"(?:arxiv\s*[:：]?\s*)?({ARXIV_ID})(?![0-9A-Za-z])", text, re.I)
     if found:
         return found[1], ""
-    raise ValueError("请发论文链接或 arXiv 编号，例如 arXiv:2005.11401。")
+    raise ValueError("请提供论文链接、DOI 或 arXiv 编号。")
+
+
+def _trim_address(value):
+    value = value.rstrip(".,;:!?")
+    for left, right in [("(", ")"), ("[", "]"), ("{", "}")]:
+        while value.endswith(right) and value.count(right) > value.count(left):
+            value = value[:-1]
+    return value
+
+
+def search_titles(query):
+    """从 Crossref 获取最多三项题名候选，供用户选择。"""
+    try:
+        return paper_sources.search_titles(query, _read_html)
+    except (ValueError, OSError) as exc:
+        raise ValueError("暂时无法访问 Crossref 题录检索，请稍后重试或提供 DOI、论文链接。") from exc
 
 
 def _pdf_path(paper, data_dir):
@@ -190,9 +240,14 @@ def _pdf_path(paper, data_dir):
     if not url or not _trusted_url(url):
         return None
     location = urlsplit(url)
+    if paper_sources.trusted_pdf_name(url):
+        name = hashlib.sha256(url.encode("utf-8")).hexdigest()
+        return Path(data_dir) / "cache" / (location.hostname + "-" + name + ".pdf")
     if location.hostname == "aclanthology.org":
         match = ACL_PAPER.fullmatch(location.path)
         return Path(data_dir) / "cache" / ("acl-" + match[1] + ".pdf") if match and location.path.endswith(".pdf") else None
+    if location.hostname not in ARXIV_HOSTS:
+        return None
     match = re.fullmatch(rf"/pdf/({ARXIV_ID})", urlsplit(url).path, re.I)
     if not match:
         return None
@@ -224,6 +279,7 @@ def _record(**fields):
         "abstract_quote", "method_quote", "abstract_original", "method_original", "pdf_url",
         "cached_pdf", "abstract_url", "method_url",
     ), "")
+    record.update(authors=[], year="", doi="", source_note="", source_version="", aliases=[], evidence_urls=[])
     record.update(fields)
     return record
 
@@ -255,6 +311,12 @@ def _acl_paper(url, data_dir, need_content):
         head = _PageText()
         head.feed(html)
         paper["title"] = head.meta.get("citation_title", "")
+        paper.update(authors=head.authors, year=head.meta.get("citation_publication_date", "")[:4],
+                     source_version="ACL Anthology 公开会议版")
+        doi = paper_sources._doi(head.meta.get("citation_doi", ""))
+        if doi:
+            paper["doi"] = doi
+            paper["aliases"].append(paper_sources.doi_url(doi))
         para = " ".join(head.acl_abstract.split())
         if para:
             paper.update(abstract_original=para, abstract_source="ACL Anthology 作者摘要",
@@ -271,30 +333,56 @@ def _acl_paper(url, data_dir, need_content):
     return paper
 
 
-def resolve_paper(text_or_url, data_dir, need_content=False):
+def resolve_paper(text_or_url, data_dir, need_content=False, *, find_pdf=False):
     """始终保留来源和版本；来源暂不可读时，仅提供确实知道的字段。"""
     arxiv_id, external = _find_target(text_or_url)
     if external:
-        return _acl_paper(external, data_dir, need_content) or _record(key="url:" + external, url=external)
+        kind, _, landing = paper_sources._identifier(external)
+        result = _acl_paper(landing, data_dir, need_content) if kind == "acl" else None
+        if result is None:
+            info = paper_sources.resolve(external, _read_html, need_content or find_pdf)
+            if info is None:
+                return _record(key="url:" + external, url=external, aliases=[external])
+            result = _record(**info)
+            if result["abstract_original"]:
+                result["abstract_quote"] = english_excerpt(result["abstract_original"], 220)
+            if need_content:
+                _pdf_evidence(result, data_dir)
+            stored = cached_pdf(result, data_dir)
+            result["cached_pdf"] = str(stored) if stored else ""
+        result["aliases"] = list(dict.fromkeys([external, result["url"], *result["aliases"]]))
+        result["evidence_urls"] = list(dict.fromkeys(u for u in
+            [external, *result["evidence_urls"], result["url"], result["pdf_url"]] if u))
+        return result
     base_id = re.sub(r"v\d+$", "", arxiv_id, flags=re.I)
     url = "https://arxiv.org/abs/" + arxiv_id
     result = _record(key="arxiv:" + base_id.lower(), url=url, pdf_url="https://arxiv.org/pdf/" + arxiv_id)
+    evidence_id = arxiv_id
+    result.update(doi="10.48550/arxiv." + base_id.lower(), source_version="arXiv " + arxiv_id)
+    original = re.search(r"https?://[^\s<>\"'`，。；、！？（）【】\u4e00-\u9fff]+", str(text_or_url), re.I)
+    result["aliases"] = list(dict.fromkeys([*([_trim_address(original[0])] if original else []), url,
+                                             paper_sources.doi_url(result["doi"])]))
     if arxiv_id in (SAMPLE_ID, SAMPLE["arxiv_id"]):
         for field in ("title", "abstract_zh", "method", "abstract_source", "method_source", "abstract_quote",
                       "method_quote", "abstract_original", "method_original"):
             result[field] = SAMPLE[field]
         result.update(pdf_url="https://arxiv.org/pdf/" + SAMPLE["arxiv_id"],
-                      abstract_url=SAMPLE["original_abstract_url"], method_url=SAMPLE["original_method_url"])
+                      abstract_url=SAMPLE["original_abstract_url"], method_url=SAMPLE["original_method_url"],
+                      source_version="arXiv " + SAMPLE["arxiv_id"])
     else:
         try:
             head = _PageText()
             head.feed(_read_html(url, 1024 * 1024))
             result["title"] = head.meta.get("citation_title", "")
+            result.update(authors=head.authors, year=head.meta.get("citation_date", "")[:4])
+            if arxiv_id == base_id and re.fullmatch(re.escape(base_id.lower()) + r"v\d+", head.arxiv_citation):
+                evidence_id = head.arxiv_citation
+                result.update(source_version="arXiv " + evidence_id, pdf_url="https://arxiv.org/pdf/" + evidence_id)
             abstract = next((body for tag, body in head.blocks if tag == "blockquote"), "")
             abstract = re.sub(r"^Abstract\s*:\s*", "", abstract).strip() or head.meta.get("og:description", "")
             if abstract:
                 result.update(abstract_original=abstract, abstract_quote=english_excerpt(abstract, 220),
-                              abstract_source="arXiv 作者摘要", abstract_url=url)
+                              abstract_source="arXiv 作者摘要", abstract_url="https://arxiv.org/abs/" + evidence_id)
                 if re.search(r"[\u4e00-\u9fff]{4}", abstract):
                     result["abstract_zh"] = abstract
         except HTTPError as exc:
@@ -303,7 +391,7 @@ def resolve_paper(text_or_url, data_dir, need_content=False):
         except (OSError, ValueError):
             pass
         if need_content and result["title"]:
-            html_url = "https://arxiv.org/html/" + arxiv_id
+            html_url = "https://arxiv.org/html/" + evidence_id
             try:
                 article = _PageText()
                 article.feed(_read_html(html_url, 5 * 1024 * 1024))
@@ -320,6 +408,8 @@ def resolve_paper(text_or_url, data_dir, need_content=False):
             _pdf_evidence(result, data_dir)
     stored = cached_pdf(result, data_dir)
     result["cached_pdf"] = str(stored) if stored else ""
+    result["evidence_urls"] = list(dict.fromkeys(u for u in
+        [url, result["pdf_url"], result["abstract_url"], result["method_url"]] if u))
     return result
 
 
@@ -328,9 +418,14 @@ def download_pdf(paper, data_dir):
     ready = cached_pdf(paper, data_dir)
     if ready:
         return ready
+    if not paper.get("pdf_url") and paper_sources._identifier(paper.get("url", ""))[0] in {"doi", "ieee"}:
+        paper.update(resolve_paper(paper["url"], data_dir, find_pdf=True))
+        ready = cached_pdf(paper, data_dir)
+        if ready:
+            return ready
     target = _pdf_path(paper, data_dir)
     if target is None:
-        raise ValueError("这个来源可保存链接；当前支持下载 arXiv 和 ACL Anthology 的原文 PDF。")
+        raise ValueError(paper.get("source_note") or "未确认可下载的公开原文，可提供会议开放页面或 arXiv、ACL Anthology 链接。")
     target.parent.mkdir(parents=True, exist_ok=True)
     workfile = None
     try:

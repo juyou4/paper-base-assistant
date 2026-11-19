@@ -7,6 +7,7 @@ from collections import defaultdict
 from activity import step
 from papers import _find_target
 from preflight import _same_article
+from source_library import existing_source, remember
 from table_store import FeishuTable, LocalTable, TableError, TargetChanged, _check_fields, _identity
 
 
@@ -43,8 +44,12 @@ def _paper_key(url):
     return _identity(url)
 
 
-def _same_source(paper_url, address):
-    return bool(address) and _same_article({"url": paper_url, "key": _paper_key(paper_url)}, address)
+def _same_source(paper_url, address, evidence_urls=()):
+    if isinstance(address, str) and address.startswith("/api/attachments/"):
+        from paper_attachments import matches_source
+        return matches_source(paper_url, address)
+    return bool(address) and _same_article(
+        {"url": paper_url, "key": _paper_key(paper_url), "evidence_urls": evidence_urls}, address)
 
 
 def _blocks(items):
@@ -69,7 +74,7 @@ def _blocks(items):
         ))
         if not same_math:
             lines.append(f"原文摘录：{item['quote']}")
-        lines.append(f"出处：{item['source']}  {item['source_url']}")
+        lines.append(f"出处：{item['source']}  {item.get('public_source_url') or item['source_url']}")
         if item.get("image_url"):
             lines.append("原图：" + item["image_url"])
         block = "\n".join(lines)
@@ -107,6 +112,21 @@ def _locate(table, schema, link, title, url, paper_title, rows):
     return row
 
 
+def _field_values(items, before, identifiers):
+    values = {}
+    modes = {}
+    for name, blocks in _blocks(items).items():
+        old = before.get(name, "")
+        additions = [b for b in blocks if b not in old]
+        modes[name] = ("append" if old else "set") if additions else "unchanged"
+        values[name] = "\n\n".join(([old] if old else []) + additions)
+    for name, value in identifiers:
+        if name:
+            modes[name] = "unchanged" if before.get(name) else "set"
+            values[name] = before.get(name) or value
+    return values, modes
+
+
 def _prepare_one(table, url, entry, schema, rows):
     columns = {"url": _field(schema, "url")}
     try:
@@ -122,22 +142,12 @@ def _prepare_one(table, url, entry, schema, rows):
     link = columns["url"]["name"]
     row = _locate(table, schema, link, title_col, url, entry["title"], rows)
     before = row["fields"] if row else {}
-    values = {}
-    modes = {}
-    for name, blocks in _blocks(entry["items"]).items():
-        old = before.get(name, "")
-        additions = [b for b in blocks if b not in old]
-        modes[name] = ("append" if old else "set") if additions else "unchanged"
-        values[name] = "\n\n".join(([old] if old else []) + additions)
-    for name, value in ((link, url), (title_col, entry["title"])):
-        if name:
-            modes[name] = "unchanged" if before.get(name) else "set"
-            values[name] = before.get(name) or value
+    values, modes = _field_values(entry["items"], before, ((link, url), (title_col, entry["title"])))
     _check_fields(schema, values)
     entry.update(action=("create" if row is None else
                          "unchanged" if all(m == "unchanged" for m in modes.values()) else "update"),
                  fields=[{"name": name, "mode": mode} for name, mode in modes.items()], status="ready")
-    return {"key": _paper_key(url), "link": link, "title_col": title_col,
+    return {"key": _paper_key(url), "target_url": url, "link": link, "title_col": title_col,
             "record_id": row["id"] if row else None, "before": {n: before.get(n, "") for n in values},
             "patch": {n: v for n, v in values.items() if modes[n] != "unchanged"},
             "values": values, "schema": [dict(f) for f in schema if f["name"] in values],
@@ -156,7 +166,7 @@ def prepare(table, urls, kinds=None):
     tool = getattr(table, "tool_name", None)
     with step("读取回填目标字段和现有记录", tool=tool):
         schema, rows = table.schema(), table.rows()
-    entries, drafts, seen = [], [], set()
+    entries, drafts, seen, prepared_keys = [], [], set(), set()
     for ref in urls:
         entry = {"url": ref, "title": ref, "items": [], "status": "skipped"}
         entries.append(entry)
@@ -169,9 +179,14 @@ def prepare(table, urls, kinds=None):
             with step(f"提取第 {len(entries)} 篇论文的原文证据", tool="论文解析"):
                 paper = (extract_evidence(requested, include_formulas=True) if "formula" in wanted
                          else extract_evidence(requested))
-                if not _same_source(requested, paper["url"]):
+                evidence_urls = paper.get("evidence_urls", ())
+                # CVF 等出版页面可能解析成 DOI。仅接受解析器为该版本核实的原始入口。
+                if not (_same_source(requested, paper["url"]) or
+                        (not key.startswith("arxiv:") and requested in evidence_urls)):
                     raise ValueError("论文来源与请求的链接或版本不一致。")
                 entry.update(title=paper["title"], url=paper["url"])
+                if paper.get("source_version"):
+                    entry["source_version"] = paper["source_version"]
                 if not entry["title"]:
                     raise ValueError("论文缺少可核验的标题。")
                 entry["items"] = [dict(item) for item in paper["items"] if item["kind"] in wanted]
@@ -189,10 +204,22 @@ def prepare(table, urls, kinds=None):
                         raise ValueError("缺少可核对的公式源码，请查看原文。")
                     if (not all(isinstance(item.get(k), str) and item[k].strip()
                                 for k in ("label", "value", "source", "quote", "source_url"))
-                            or not _same_source(entry["url"], item["source_url"])):
+                            or not _same_source(entry["url"], item["source_url"], evidence_urls)
+                            or (item.get("public_source_url") and
+                                not _same_source(entry["url"], item["public_source_url"], evidence_urls))):
                         raise ValueError("提取项缺少本篇论文的原文、数值或定位链接。")
             with step(f"核对第 {len(entries)} 篇论文的目标行与列", tool=tool), table._lock:
-                draft = _prepare_one(table, entry["url"], entry, schema, rows)
+                aliases = list(dict.fromkeys([requested, entry["url"], *paper.get("aliases", [])]))
+                keys = {_paper_key(address) for address in aliases}
+                if prepared_keys & keys:
+                    raise ValueError("本批次中已出现同一篇论文。")
+                anchor = existing_source(table, aliases, rows=rows)
+                target = anchor if anchor and _identity(anchor) != _identity(entry["url"]) else entry["url"]
+                draft = _prepare_one(table, target, entry, schema, rows)
+                draft["aliases"] = aliases
+                if target != entry["url"]:
+                    entry["target_url"] = target
+                prepared_keys.update(keys)
         except (ValueError, TableError, OSError) as error:
             entry["error"] = str(error)
             draft = None
@@ -208,7 +235,11 @@ def _check_target(table, entry, draft):
     schema = table.schema()
     if any(field not in schema for field in draft["schema"]):
         raise ValueError("目标列已变更，请重新预览。")
-    row = _locate(table, schema, draft["link"], draft["title_col"], entry["url"], entry["title"], table.rows())
+    rows = table.rows()
+    anchor = existing_source(table, draft["aliases"], rows=rows)
+    if anchor and _identity(anchor) != _identity(draft["target_url"]):
+        raise ValueError("已收藏论文的目标链接在预览后发生变化，请重新核对。")
+    row = _locate(table, schema, draft["link"], draft["title_col"], draft["target_url"], entry["title"], rows)
     if (row["id"] if row else None) != draft["record_id"]:
         raise ValueError("目标行已变更，请重新预览。")
     cells = row["fields"] if row else {}
@@ -222,18 +253,49 @@ def _check_target(table, entry, draft):
             raise ValueError("同一论文仍有内容不同的待核验新增请求，请先核对原回执。")
 
 
-def commit(table, plan):
+def _selected_drafts(plan, selection):
+    if selection is None:
+        return plan["drafts"]
+    if not isinstance(selection, list) or len(selection) != len(plan["entries"]):
+        raise ValueError("勾选范围与本批论文不一致，请重新核对预览。")
+    selected = []
+    for indices, entry, draft in zip(selection, plan["entries"], plan["drafts"]):
+        items = entry["items"]
+        if (not isinstance(indices, list) or len(indices) > len(items)
+                or any(type(i) is not int or not 0 <= i < len(items) for i in indices)
+                or len(set(indices)) != len(indices) or (indices and draft is None)):
+            raise ValueError("勾选项与原预览不一致，请重新核对预览。")
+        if not indices:
+            selected.append(None)
+            continue
+        before = draft["before"]
+        identifiers = ((draft["link"], draft["target_url"]), (draft["title_col"], entry["title"]))
+        values, modes = _field_values([items[i] for i in sorted(indices)], before, identifiers)
+        selected.append({**draft, "values": values,
+                         "before": {name: before[name] for name in values},
+                         "schema": [f for f in draft["schema"] if f["name"] in values],
+                         "patch": {name: value for name, value in values.items() if modes[name] != "unchanged"}})
+    if not any(selected):
+        raise ValueError("请至少勾选一项证据，或取消本批回填。")
+    return selected
+
+
+def commit(table, plan, selection=None):
     """使用已确认的服务端快照逐篇提交，同一计划的重复确认返回原回执。"""
     tool = getattr(table, "tool_name", None)
     with table._lock:
         if "result" in plan:
             return plan["result"]
+        drafts = _selected_drafts(plan, selection)
         results = []
-        for number, (entry, draft) in enumerate(zip(plan["entries"], plan["drafts"]), 1):
+        for number, (entry, draft) in enumerate(zip(plan["entries"], drafts), 1):
             result = {"title": entry["title"], "url": entry["url"]}
             results.append(result)
             if draft is None:
-                result.update(status="skipped", message=entry["error"])
+                if "error" in entry:
+                    result.update(status="skipped", message=entry["error"])
+                else:
+                    result.update(status="excluded", message="本篇未勾选任何证据。")
                 continue
             try:
                 with step(f"复核第 {number} 篇论文的目标与原值", tool=tool):
@@ -255,12 +317,16 @@ def commit(table, plan):
                     if (draft["record_id"] and saved["id"] != draft["record_id"] or
                             any(saved["fields"].get(n) != v for n, v in draft["values"].items())):
                         raise ValueError("回读记录或字段值与确认内容不符。")
-                result.update(status="verified", message=f"已核对 {len(draft['values'])} 个字段，回读一致。")
+                    remember(table, saved, {"url": draft["target_url"]}, draft["aliases"])
+                items = len(entry["items"]) if selection is None else len(selection[number - 1])
+                result.update(status="verified", selected_items=items,
+                              message=f"已核对 {items} 项证据和 {len(draft['values'])} 个字段，回读一致。")
             except TargetChanged as error:
                 result.update(status="failed", message=str(error))
             except (ValueError, TableError, OSError) as error:
                 result.update(status="unverified", message=f"未取得一致的写入回执，请核对表内记录。{error}")
         verified = sum(item["status"] == "verified" for item in results)
-        count = f"{verified}/{len(results)} 篇回读一致"
+        total = len(results) if selection is None else sum(draft is not None for draft in drafts)
+        count = f"{verified}/{total} 篇回读一致"
         plan["result"] = {"message": f"本次回填结束，{count}。", "verification": count, "evidence_results": results}
         return plan["result"]

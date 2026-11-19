@@ -71,6 +71,96 @@ class EvidenceWorkflowTests(unittest.TestCase):
         with patch.object(self.table, "upsert", side_effect=AssertionError("不应重写相同内容")):
             self.assertEqual(commit(self.table, repeat)["evidence_results"][0]["status"], "verified")
 
+    def test_select_items_in_shared_column_and_exclude_whole_paper(self):
+        self.table.upsert(LINK, {"论文链接": LINK, "阅读笔记": "我自己的笔记"}, "r")
+        plan, _ = prepare(self.table, [LINK, OTHER])
+        result = commit(self.table, plan, selection=[[1, 3], []])
+        self.assertEqual([p["status"] for p in result["evidence_results"]], ["verified", "excluded"])
+        self.assertIn("1/1", result["verification"])
+        self.assertEqual(len(self.table.rows()), 1)
+        cells = self.table.rows()[0]["fields"]
+        self.assertIn("我自己的笔记", cells["阅读笔记"])
+        self.assertIn("45.5", cells["阅读笔记"])
+        self.assertNotIn("44.1", cells["阅读笔记"])
+        self.assertIn("Figure 1", cells["研究笔记"])
+        self.assertNotIn("【表】", cells["研究笔记"])
+        with patch.object(self.table, "upsert", side_effect=AssertionError("已经完成的批次不能重写")):
+            self.assertEqual(commit(self.table, plan, selection=[[0], [0]]), result)
+
+    def test_invalid_selection_anywhere_rejects_entire_request_before_first_write(self):
+        plan, _ = prepare(self.table, [LINK, OTHER, LINK])
+        bad = ([[0], []], [[0], [8], []], [[0], [-1], []], [[0], [True], []],
+               [[0], [1.0], []], [[0], [1, 1], []], [[0], "1", []], [[0], [], [0]],
+               {"url": LINK, "value": "任意文字"}, [[], [], []])
+        with patch.object(self.table, "upsert", side_effect=AssertionError("非法勾选不应写入")):
+            for selection in bad:
+                with self.subTest(selection=selection), self.assertRaises(ValueError):
+                    commit(self.table, plan, selection=selection)
+        self.assertFalse(self.table.rows())
+        self.assertEqual(commit(self.table, plan, selection=[[0], [], []])["evidence_results"][0]["status"], "verified")
+
+    def test_drift_checks_only_selected_columns_and_never_overwrites_other_edits(self):
+        self.table.upsert(LINK, {"论文链接": LINK, "研究笔记": "旧笔记"}, "first")
+        plan, _ = prepare(self.table, [LINK])
+        self.table.upsert(LINK, {"研究笔记": "别人刚更新"}, "edit")
+        with patch.object(self.table, "upsert", wraps=self.table.upsert) as send:
+            self.assertEqual(commit(self.table, plan, selection=[[0]])["evidence_results"][0]["status"], "verified")
+            self.assertNotIn("研究笔记", send.call_args.args[1])
+            self.assertNotIn("研究笔记", send.call_args.kwargs["expected_fields"])
+        self.assertEqual(self.table.rows()[0]["fields"]["研究笔记"], "别人刚更新")
+        second, _ = prepare(self.table, [LINK])
+        self.table.upsert(LINK, {"阅读笔记": "我修改了目标列"}, "edit2")
+        self.assertEqual(commit(self.table, second, selection=[[1]])["evidence_results"][0]["status"], "failed")
+
+    def test_publisher_alias_preserves_original_link_and_uses_verified_pdf_page(self):
+        doi = "https://doi.org/10.1109/CVPR.2016.90"
+        ieee = "https://ieeexplore.ieee.org/document/7780459"
+        pdf = ("https://openaccess.thecvf.com/content_cvpr_2016/papers/"
+               "He_Deep_Residual_Learning_CVPR_2016_paper.pdf")
+        row = self.table.upsert(ieee, {"论文链接": ieee, "研究笔记": "会前留的笔记"}, "r")
+        item = dict(kind="metric", label="Top-1", value="25.03", quote="Top-1 error 25.03",
+                    source="CVF 第 4 页", source_url=pdf + "#page=4")
+        self.extract.side_effect = lambda url: dict(title="Deep Residual Learning for Image Recognition",
+            url=url, aliases=[ieee, doi], evidence_urls=[url, pdf], items=[item])
+        plan, reply = prepare(self.table, [doi, ieee], kinds=["metric"])
+        self.assertEqual([e["status"] for e in reply["evidence_preview"]], ["ready", "skipped"])
+        self.assertEqual(reply["evidence_preview"][0]["target_url"], ieee)
+        results = commit(self.table, plan, selection=[[0], []])["evidence_results"]
+        self.assertEqual(results[0]["record_id"], row["record_id"])
+        self.assertEqual(len(self.table.rows()), 1)
+        fields = self.table.rows()[0]["fields"]
+        self.assertEqual((fields["论文链接"], fields["研究笔记"]), (ieee, "会前留的笔记"))
+        self.assertIn(pdf + "#page=4", fields["阅读笔记"])
+
+        second, _ = prepare(self.table, [doi], kinds=["metric"])
+        self.table.upsert(doi, {"论文链接": doi}, "new")
+        self.assertEqual(commit(self.table, second, selection=[[0]])["evidence_results"][0]["status"], "failed")
+
+        # 同篇的另一个出版入口不代表这份证据实际来自该版本。
+        self.extract.side_effect = lambda url: dict(title="ResNet", url=url, aliases=[pdf], items=[item])
+        unverified, reply = prepare(self.table, [doi], kinds=["metric"])
+        self.assertEqual(unverified["ready"], 0)
+        self.assertIn("定位链接", reply["evidence_preview"][0]["error"])
+
+    def test_cvf_landing_resolving_to_canonical_doi_requires_verified_version_url(self):
+        page = ("https://openaccess.thecvf.com/content_cvpr_2016/html/"
+                "He_Deep_Residual_Learning_CVPR_2016_paper.html")
+        pdf = page.replace("/html/", "/papers/").removesuffix(".html") + ".pdf"
+        doi = "https://doi.org/10.1109/cvpr.2016.90"
+        row = self.table.upsert(doi, {"论文链接": doi}, "existing")
+        item = dict(kind="metric", label="Top-1", value="25.03", quote="Top-1 error 25.03",
+                    source="Table 2", source_url=pdf + "#page=5")
+        paper = dict(title="Deep Residual Learning for Image Recognition", url=doi,
+                     evidence_urls=[doi, pdf], aliases=[doi, page], items=[item])
+        self.extract.side_effect = lambda _: paper
+        unverified, _ = prepare(self.table, [page], kinds=["metric"])
+        self.assertEqual(unverified["ready"], 0)
+        paper["evidence_urls"].append(page)
+        plan, _ = prepare(self.table, [page], kinds=["metric"])
+        receipt = commit(self.table, plan, selection=[[0]])["evidence_results"][0]
+        self.assertEqual((receipt["status"], receipt["record_id"]), ("verified", row["record_id"]))
+        self.assertEqual(len(self.table.rows()), 1)
+
     def test_latex_survives_preview_confirm_readback_and_repeat(self):
         latex = "\\begin{aligned}\ny &= \\frac{x_1}{2} \\\\\nz &= x^{2}\n\\end{aligned}"
         item = dict(kind="formula", label="Equation 1", value=latex, latex=latex, quote=latex,

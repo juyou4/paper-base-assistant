@@ -27,11 +27,13 @@ let switchingModel = false;
 let refreshingState = false;
 let pendingId = null;
 let reviewId = null;
+const reviewSelections = new Map();
 let selectedId = null;
 let viewMode = "cards";
 let latestStateRequest = 0;
 let retryableRequest = null;
 let sendResetTimer = null;
+let uploadingPdf = false;
 
 function safeLink(address, sameOrigin = false) {
   if (typeof address !== "string" || !address.trim()) return null;
@@ -431,6 +433,9 @@ function autoResizePrompt() {
 function controls() {
   const input = byId("prompt");
   const locked = busy || switchingModel || refreshingState || !ready;
+  byId("pdf-add").disabled = locked || uploadingPdf;
+  byId("pdf-bind").disabled = locked || uploadingPdf;
+  byId("pdf-save").disabled = byId("pdf-extract").disabled = locked || Boolean(pendingId) || uploadingPdf;
   byId("send").disabled = locked || !input.value.trim();
   input.disabled = busy || !ready;
   byId("refresh").disabled = busy || switchingModel || refreshingState;
@@ -444,8 +449,9 @@ function controls() {
   document.querySelectorAll("[data-choice]").forEach(btn => {
     btn.disabled = locked || btn.dataset.task !== pendingId;
   });
-  byId("review-confirm").disabled = byId("review-cancel").disabled =
-    locked || !reviewId || reviewId !== pendingId;
+  const reviewLocked = locked || !reviewId || reviewId !== pendingId;
+  byId("review-cancel").disabled = reviewLocked;
+  byId("review-confirm").disabled = reviewLocked || !reviewSelections.get(reviewId)?.some(items => items.some(Boolean));
   const emptyCta = byId("empty-try-btn");
   if (emptyCta) emptyCta.disabled = locked || Boolean(pendingId);
 }
@@ -752,6 +758,7 @@ async function refreshState(manual = false) {
       capabilities: snapshot.capabilities || {}
     };
     ready = true;
+    renderPdfTray();
     renderState();
     if (manual) showToast("表格已刷新");
   } catch (err) {
@@ -935,9 +942,12 @@ function showEvidence(items) {
 
 // 原文引用和原图使用提取器支持的站点。
 function paperSourceLink(address) {
+  if (typeof address === "string" && /^\/api\/attachments\/[0-9a-f]{64}#page=[1-9]\d*$/.test(address)) {
+    return new URL(address, location.origin).href;
+  }
   try {
     const url = new URL(address);
-    const hosts = ["arxiv.org", "aclanthology.org"];
+    const hosts = ["arxiv.org", "aclanthology.org", "openaccess.thecvf.com", "openreview.net", "doi.org", "ieeexplore.ieee.org"];
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.port ||
         !hosts.some(host => url.hostname === host || url.hostname.endsWith("." + host))) return null;
     return url.href;
@@ -948,11 +958,12 @@ function paperSourceLink(address) {
 
 const evidenceKinds = { metric: "关键数据", figure: "图", table: "表", formula: "公式" };
 
-function reviewItem(item, paperUrl) {
+function reviewItem(item, paperUrl, checkbox) {
   const block = make("section", undefined, "review-item");
   block.dataset.kind = item.kind;
   const kind = evidenceKinds[item.kind] || "论文摘录";
   const meta = make("div", undefined, "review-meta");
+  if (checkbox) meta.append(checkbox);
   meta.append(make("span", kind, "evidence-tag"));
   if (item.field) meta.append(make("span", "回填至「" + item.field + "」"));
   block.append(meta, PaperRichText.render(make("h4"), item.label, true));
@@ -1022,6 +1033,19 @@ function openEvidenceReview(preview) {
   const kindSelect = byId("review-kind");
   reviewId = preview.id;
   const readyPapers = preview.papers.filter(paper => paper.status === "ready");
+  const actionable = Boolean(reviewId && reviewId === pendingId && readyPapers.length);
+  if (actionable && !reviewSelections.has(reviewId)) {
+    reviewSelections.set(reviewId, preview.papers.map(paper =>
+      paper.status === "ready" ? paper.items.map(() => true) : []));
+  }
+  const selections = reviewSelections.get(reviewId);
+  function updateCount() {
+    const counts = (selections || []).map(items => items.filter(Boolean).length);
+    const papers = counts.filter(Boolean).length;
+    const items = counts.reduce((total, count) => total + count, 0);
+    byId("review-confirm").textContent = "确认回填 " + papers + " 篇（" + items + " 项）";
+    controls();
+  }
   const target = (state.mode === "feishu" ? "飞书" : "本地") + "「" + (state.table_name || "阅读清单") + "」";
   byId("review-summary").textContent = preview.papers.length + " 篇论文 · " +
     readyPapers.length + " 篇可回填 · " + target;
@@ -1032,17 +1056,71 @@ function openEvidenceReview(preview) {
     paperSelect.add(new Option((index + 1) + ". " + title, index));
     const action = { create: "新建记录", update: "更新记录", unchanged: "无需修改" }[paper.action];
     const items = Array.isArray(paper.items) ? paper.items : [];
-    section.append(make("h3", title), make("span", paper.status === "ready"
-      ? [items.length + " 项", action].filter(Boolean).join(" · ") : "跳过本篇", "review-paper-meta"));
+    const paperMeta = make("span", paper.status === "ready"
+      ? [items.length + " 项", action].filter(Boolean).join(" · ") : "跳过本篇", "review-paper-meta");
+    const mapping = make("p", undefined, "review-mapping");
+    section.append(make("h3", title), paperMeta);
+    const selected = selections?.[index];
+    const group = make("input");
+    const inputs = [];
+    function syncGroup() {
+      group.checked = selected.every(Boolean);
+      group.indeterminate = !group.checked && selected.some(Boolean);
+      const count = selected.filter(Boolean).length;
+      paperMeta.textContent = "已选 " + count + "/" + items.length + " 项" +
+        (group.checked && action ? " · " + action : "");
+      const evidenceFields = new Set(items.map(item => item.field));
+      const selectedFields = new Set(items.filter((_, i) => selected[i]).map(item => item.field));
+      const fieldNames = (paper.fields || []).map(field => field.name)
+        .filter(name => !evidenceFields.has(name) || selectedFields.has(name));
+      const modes = { set: "填入", append: "追加", unchanged: "保留原值" };
+      mapping.textContent = group.checked
+        ? (paper.fields || []).map(field => (modes[field.mode] || "填入") + "「" + field.name + "」").join(" · ")
+        : count && fieldNames.length ? "目标列 · " + fieldNames.join("、") : "";
+      mapping.hidden = !mapping.textContent;
+    }
+    if (selected?.length) {
+      const toggle = make("label", undefined, "review-toggle");
+      group.type = "checkbox";
+      group.disabled = !actionable;
+      group.setAttribute("aria-label", "全选本篇提取项：" + title);
+      toggle.append(group, make("span", "全选本篇"));
+      section.append(toggle);
+      syncGroup();
+      group.addEventListener("change", () => {
+        selected.fill(group.checked);
+        inputs.forEach(input => { input.checked = group.checked; });
+        syncGroup();
+        updateCount();
+      });
+    }
     if (paperUrl) section.append(link("打开论文 ↗", paperUrl, "review-source"));
+    if (paper.source_version) section.append(make("p", "证据版本 · " + paper.source_version, "review-mapping"));
+    const targetUrl = paperSourceLink(paper.target_url);
+    if (targetUrl) section.append(link("打开已收藏的目标记录原文 ↗", targetUrl, "review-source"));
     if (paper.error) section.append(make("p", paper.error, "review-error"));
     if (paper.notice) section.append(make("p", paper.notice, "review-mapping"));
     if (paper.fields?.length) {
-      const modes = { set: "填入", append: "追加", unchanged: "保留原值" };
-      const mapping = paper.fields.map(field => (modes[field.mode] || "填入") + "「" + field.name + "」");
-      section.append(make("p", mapping.join(" · "), "review-mapping"));
+      if (!selected?.length) mapping.textContent = "目标列 · " + paper.fields.map(field => field.name).join("、");
+      section.append(mapping);
     }
-    for (const item of items) section.append(reviewItem(item, paperUrl));
+    items.forEach((item, itemIndex) => {
+      let checkbox;
+      if (selected?.length) {
+        checkbox = make("input", undefined, "review-check");
+        checkbox.type = "checkbox";
+        checkbox.checked = selected[itemIndex];
+        checkbox.disabled = !actionable;
+        checkbox.setAttribute("aria-label", "回填" + (evidenceKinds[item.kind] || "摘录") + "：" + item.label);
+        checkbox.addEventListener("change", () => {
+          selected[itemIndex] = checkbox.checked;
+          syncGroup();
+          updateCount();
+        });
+        inputs.push(checkbox);
+      }
+      section.append(reviewItem(item, paperUrl, checkbox));
+    });
     container.append(section);
   });
   kindSelect.onchange = () => {
@@ -1068,11 +1146,8 @@ function openEvidenceReview(preview) {
     kindSelect.onchange();
   };
   paperSelect.onchange();
-  const actionable = Boolean(reviewId && reviewId === pendingId && readyPapers.length);
   dialog.querySelector("footer").hidden = !actionable;
-  const totalItems = readyPapers.reduce((total, paper) => total + paper.items.length, 0);
-  byId("review-confirm").textContent = "确认回填 " + readyPapers.length + " 篇（" + totalItems + " 项）";
-  controls();
+  updateCount();
   dialog.showModal();
   byId("review-title").focus();
   container.scrollTop = 0;
@@ -1080,7 +1155,7 @@ function openEvidenceReview(preview) {
 
 function appendEvidenceResults(article, results) {
   const list = make("ul", undefined, "review-results");
-  const statuses = { verified: "回读一致", skipped: "已跳过", failed: "处理失败", unverified: "待核验" };
+  const statuses = { verified: "回读一致", excluded: "未勾选", skipped: "已跳过", failed: "处理失败", unverified: "待核验" };
   for (const result of results) {
     const row = make("li");
     row.dataset.status = result.status;
@@ -1091,12 +1166,48 @@ function appendEvidenceResults(article, results) {
   article.append(list);
 }
 
+function appendCollection(article, cards) {
+  const list = make("div", undefined, "collection-list");
+  const records = new Map();
+  for (const card of cards) {
+    // 同一条记录只显示一次，保留本批较晚回读的完整来源。
+    records.set(card.record_id || card.url, card);
+  }
+  for (const card of records.values()) {
+    const block = make("section", undefined, "collection-card");
+    block.append(make("strong", card.title));
+    if (card.error) {
+      block.append(make("small", card.error));
+    } else {
+      const authors = card.authors.slice(0, 3).join("、") + (card.authors.length > 3 ? " 等" : "");
+      block.append(make("small", [authors, card.year, card.reading_status, card.version].filter(Boolean).join(" · ")));
+      if (card.notice) block.append(make("small", card.notice));
+      const links = make("div", undefined, "collection-links");
+      for (const raw of card.sources) {
+        const address = safeLink(raw);
+        if (address) links.append(link(shortHost(address) || "来源", address));
+      }
+      if (card.fulltext_url && safeLink(card.fulltext_url)) {
+        links.append(link("打开全文 ↗", safeLink(card.fulltext_url)));
+      }
+      block.append(links);
+    }
+    list.append(block);
+  }
+  article.append(list);
+}
+
 async function submit(text) {
   const instruction = text.trim();
   if (!instruction || busy || switchingModel || refreshingState || !ready) return;
   const task = pendingId;
-  const matchingRetry = retryableRequest?.message === instruction && retryableRequest.task === task;
-  const request = matchingRetry ? retryableRequest : { id: crypto.randomUUID(), message: instruction, task };
+  const confirm = /^确认(?:回填|写入|提交)(?:\s+[0-9a-f]{32})?[。！!]?$/.test(instruction);
+  const selection = confirm && reviewSelections.has(task)
+    ? reviewSelections.get(task).map(items => items.flatMap((checked, index) => checked ? [index] : []))
+    : undefined;
+  const matchingRetry = retryableRequest?.message === instruction && retryableRequest.task === task &&
+    JSON.stringify(retryableRequest.selection) === JSON.stringify(selection);
+  const request = matchingRetry ? retryableRequest : { id: crypto.randomUUID(), message: instruction, task, selection };
   retryableRequest = null;
 
   busy = true;
@@ -1115,6 +1226,7 @@ async function submit(text) {
       body: JSON.stringify({
         message: instruction,
         request_id: request.id,
+        evidence_selection: request.selection,
         ...(task ? { pending_id: task } : {})
       })
     });
@@ -1123,6 +1235,7 @@ async function submit(text) {
 
     const { article } = appendMessage(result.message || "已完成。", "assistant");
     appendModelTrace(article, result.agent);
+    if (result.collection?.length) appendCollection(article, result.collection);
 
     if (result.evidence_preview?.papers?.length) {
       const preview = result.evidence_preview;
@@ -1163,7 +1276,7 @@ async function submit(text) {
     }
 
     if (result.row) selectedId = result.row.id;
-    const incomplete = result.evidence_results?.some(item => item.status !== "verified");
+    const incomplete = result.evidence_results?.some(item => !["verified", "excluded"].includes(item.status));
 
     if (result.verification) {
       const verifyEl = byId("verification");
@@ -1202,6 +1315,126 @@ async function submit(text) {
     controls();
     byId("chat").scrollTop = byId("chat").scrollHeight;
   }
+}
+
+function renderPdfTray(selected = byId("pdf-select").value) {
+  const items = state.attachments || [];
+  byId("pdf-tray").hidden = !items.length;
+  if (!items.length) return;
+  const select = byId("pdf-select");
+  const unchanged = select.dataset.active === selected && items.some(item => item.id === selected);
+  select.replaceChildren(...items.map(item => new Option(item.filename +
+    (item.paper_url ? " · 已关联" : " · 待关联"), item.id)));
+  const item = items.find(entry => entry.id === selected) || items[0];
+  select.value = select.dataset.active = item.id;
+  byId("pdf-count").textContent = "PDF 附件 · " + items.length;
+  byId("pdf-open").href = item.viewer;
+  byId("pdf-associate").hidden = Boolean(item.paper_url);
+  byId("pdf-bound").hidden = !item.paper_url;
+  byId("pdf-paper").textContent = item.title;
+  const target = byId("pdf-target");
+  const previous = unchanged ? target.value : "";
+  const {titleField, urlField} = detectPrimaryFields(state.fields || []);
+  target.replaceChildren(new Option("输入 DOI 或论文链接", ""));
+  for (const row of state.rows || []) {
+    const url = cellValue(row.fields[urlField?.name]);
+    if (url && /^https:\/\//i.test(url)) {
+      const option = new Option(cellValue(row.fields[titleField?.name]) || url, row.id);
+      option.dataset.url = url;
+      target.add(option);
+    }
+  }
+  target.value = previous;
+  byId("pdf-manual").hidden = Boolean(target.value);
+  byId("pdf-identifiers").replaceChildren(...item.candidates.map(value => new Option(value, value)));
+  if (!unchanged) {
+    byId("pdf-ref").value = item.candidates.length === 1 ? item.candidates[0] : "";
+    byId("pdf-title").value = item.title;
+  }
+  byId("pdf-status").textContent = item.paper_url ? "" : item.candidates.length
+    ? "请对照首页核对候选标识与版本，再确认关联。"
+    : "文件已保留。可稍后补充论文链接，或从阅读清单选择论文。";
+}
+
+async function receivePdfs(files) {
+  if (busy || uploadingPdf || !ready || !files.length) return;
+  uploadingPdf = true;
+  controls();
+  byId("pdf-add").textContent = "正在读取…";
+  try {
+    for (const file of files) {
+      try {
+        if (!/\.pdf$/i.test(file.name) || file.size > 50 * 1024 * 1024) {
+          throw new Error("请选择 50 MB 以内的 PDF 文件。");
+        }
+        const item = await api("/api/attachments", {method: "POST", body: file,
+          headers: {"Content-Type": "application/pdf", "X-Pdf-Name": encodeURIComponent(file.name)}});
+        state.attachments = [item, ...(state.attachments || []).filter(other => other.id !== item.id)];
+        renderPdfTray(item.id);
+        byId("pdf-tray").open = true;
+      } catch (error) {
+        showToast(file.name + "：" + error.message, "error");
+      }
+    }
+  } finally {
+    uploadingPdf = false;
+    byId("pdf-add").textContent = "添加 PDF";
+    byId("pdf-files").value = "";
+    controls();
+  }
+}
+
+byId("pdf-add").addEventListener("click", () => byId("pdf-files").click());
+byId("pdf-files").addEventListener("change", event => receivePdfs(Array.from(event.target.files)));
+byId("pdf-select").addEventListener("change", event => renderPdfTray(event.target.value));
+byId("pdf-target").addEventListener("change", event => { byId("pdf-manual").hidden = Boolean(event.target.value); });
+const composer = byId("composer");
+composer.addEventListener("dragover", event => {
+  if (event.dataTransfer.types.includes("Files")) {
+    event.preventDefault();
+    composer.classList.add("pdf-drop");
+  }
+});
+composer.addEventListener("dragleave", event => {
+  if (!composer.contains(event.relatedTarget)) composer.classList.remove("pdf-drop");
+});
+composer.addEventListener("drop", event => {
+  if (!event.dataTransfer.files.length) return;
+  event.preventDefault();
+  composer.classList.remove("pdf-drop");
+  receivePdfs(Array.from(event.dataTransfer.files));
+});
+byId("pdf-bind").addEventListener("click", async () => {
+  if (uploadingPdf || busy) return;
+  const id = byId("pdf-select").value;
+  const target = byId("pdf-target").value;
+  const body = target ? {record_id: target, expected_url: byId("pdf-target").selectedOptions[0].dataset.url}
+    : {paper_ref: byId("pdf-ref").value.trim(), title: byId("pdf-title").value.trim()};
+  if (!target && !body.paper_ref) {
+    byId("pdf-ref").focus();
+    return;
+  }
+  uploadingPdf = true;
+  controls();
+  byId("pdf-status").textContent = "正在核对关联…";
+  try {
+    const item = await api("/api/attachments/" + id + "/bind", {method: "POST",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    state.attachments = state.attachments.map(other => other.id === item.id ? item : other);
+    renderPdfTray(item.id);
+    showToast("已关联正文，可开始提取");
+  } catch (error) {
+    byId("pdf-status").textContent = error.message;
+  } finally {
+    uploadingPdf = false;
+    controls();
+  }
+});
+for (const [id, instruction] of [["pdf-save", "把这篇论文收藏到表中 "], ["pdf-extract", "提取这篇论文的关键数据和图表 "]]) {
+  byId(id).addEventListener("click", () => {
+    const item = state.attachments?.find(entry => entry.id === byId("pdf-select").value);
+    if (item?.paper_url) submit(instruction + item.paper_url);
+  });
 }
 
 byId("composer").addEventListener("submit", event => {

@@ -51,6 +51,11 @@
   --t-snap: 416ms;
 }
 
+.collection-list { display: grid; gap: 8px; margin-top: 12px; }
+.collection-card { display: grid; gap: 6px; border: 1px solid var(--border-strong); border-radius: 16px; padding: 12px 15px; overflow-wrap: anywhere; }
+.collection-card small { color: var(--muted); }
+.collection-links { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.8rem; }
+
 :root[data-theme="dark"] {
   color-scheme: dark;
   --bg: #111114;
@@ -1043,6 +1048,31 @@ h2 {
   box-shadow: 0 6px 18px -4px rgba(0, 0, 0, 0.065);
 }
 
+.pdf-drop .composer-card { outline: 2px dashed currentColor; outline-offset: 3px; }
+.pdf-tray {
+  margin: 0 0 .5rem;
+  padding: .5rem .75rem;
+  border: 1px solid var(--border, #9996);
+  border-radius: 14px;
+  max-height: min(35vh, 300px);
+  overflow-y: auto;
+  color: inherit;
+  font-size: .82rem;
+}
+.pdf-tray summary { cursor: pointer; font-weight: 600; }
+.pdf-tray label { display: grid; gap: .25rem; min-width: 0; flex: 1; }
+.pdf-tray input, .pdf-tray select {
+  width: 100%; min-width: 0; padding: .4rem .55rem; border-radius: 8px;
+  font: inherit; color: inherit; background: var(--bg, Canvas); border: 1px solid var(--border, #9996);
+}
+.pdf-controls, #pdf-bound:not([hidden]), #pdf-manual:not([hidden]) {
+  display: flex; flex-wrap: wrap; align-items: end; gap: .5rem; margin: .45rem 0;
+}
+.pdf-controls a { color: inherit; padding: .4rem; }
+#pdf-associate > button { margin-top: .35rem; }
+#pdf-status { margin: .25rem 0; }
+#pdf-status:empty { display: none; }
+
 textarea {
   display: block;
   width: 100%;
@@ -1960,6 +1990,23 @@ dialog::backdrop {
 .review-paper { padding: 12px 0; overflow-wrap: anywhere; }
 .review-paper h3 { margin: 0; font-size: 15px; line-height: 1.45; }
 .review-paper-meta { display: inline-block; margin-inline-end: 9px; }
+.review-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-inline-end: 9px;
+  font-size: 12px;
+  color: var(--ink);
+  cursor: pointer;
+}
+.review-toggle input, .review-check {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--ink);
+  cursor: pointer;
+}
+.review-item:has(.review-check:not(:checked)) { background: var(--card); }
 .review-source, .review-image {
   display: inline-block;
   margin-top: 6px;

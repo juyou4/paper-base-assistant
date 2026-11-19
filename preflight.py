@@ -1,7 +1,7 @@
 """在调用写表接口前，逐项核对目标、来源证据和生成内容。"""
 
 import re
-from urllib.parse import urlsplit
+from urllib.parse import urldefrag, urlsplit
 
 import model_support
 import papers
@@ -22,8 +22,9 @@ def _same_article(paper, address):
         requested = re.search(r"v(\d+)(?:\.pdf)?/?$", urlsplit(paper["url"]).path)
         evidence = re.search(r"v(\d+)(?:\.pdf)?/?$", url.path)
         return not requested or bool(evidence and requested[1] == evidence[1])
-    landing = urlsplit(paper["url"])
-    return url.hostname == landing.hostname and url.path.removesuffix(".pdf").rstrip("/") == landing.path.rstrip("/")
+    if any(urldefrag(address).url == urldefrag(verified).url for verified in paper.get("evidence_urls", [])):
+        return True
+    return bool(papers.paper_keys(paper["url"]) & papers.paper_keys(address))
 
 
 def _check_rewordings(items):

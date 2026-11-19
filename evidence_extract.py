@@ -369,6 +369,7 @@ def _nearby_caption(page, box):
 
 
 def _pdf_tables(path, paper, text):
+    from pdf_text_tables import captioned_numeric_tables
     try:
         import pdfplumber
     except ImportError:
@@ -392,6 +393,12 @@ def _pdf_tables(path, paper, text):
                                             source + " · " + label, url, paper["title"]))
                     if sum(i["kind"] == "table" for i in result) >= 2:
                         return result
+                for label, caption, cells in captioned_numeric_tables(page):
+                    if any(i["kind"] == "table" and i["source_url"] == url and i["label"] == label for i in result):
+                        continue
+                    result.extend(_pdf_grid(cells, label, caption, f"{source} · {label} · {caption}", url, paper["title"]))
+                    if sum(i["kind"] == "table" for i in result) >= 2:
+                        return result
                 page.close()
     except Exception:
         # PDFMiner 对损坏字体/内容流的异常分布在多个模块，仍保留已提取的可靠表格。
@@ -399,28 +406,51 @@ def _pdf_tables(path, paper, text):
     return result
 
 
-def _pdf_evidence(paper):
+def _file_evidence(pdf, paper):
     executable = shutil.which("pdftotext")
+    text = ""
+    if executable:
+        try:
+            output = subprocess.run([executable, "-f", "1", "-l", "32", "-raw", "-enc", "UTF-8",
+                                     str(pdf), "-"], timeout=18, check=True, capture_output=True)
+            text = output.stdout.decode("utf-8", errors="replace")
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if not text.strip():
+        try:
+            import pdfplumber
+            with pdfplumber.open(pdf, pages=range(1, 33)) as doc:
+                text = "\f".join(page.extract_text() or "" for page in doc.pages)
+        except Exception:
+            # PDFMiner 在部分损坏文件上也会抛出独立的解析异常，留给逐篇结果提示。
+            pass
+    structured = _pdf_tables(pdf, paper, text)
+    covered = {(i["source_url"], i["label"].casefold()) for i in structured if i["kind"] == "table"}
+    captions = [i for i in _pdf_items(text, paper["pdf_url"])
+                if (i["source_url"], i["label"].casefold()) not in covered]
+    if not text.strip() and not structured:
+        raise ValueError("未读到 PDF 正文。请检查文件，扫描件请先提供带 OCR 文本层的副本。")
+    return structured + captions
+
+
+def _pdf_evidence(paper):
     with tempfile.TemporaryDirectory() as work:
-        pdf = papers.download_pdf(paper, work)
-        text = ""
-        if executable:
-            try:
-                output = subprocess.run([executable, "-f", "1", "-l", "32", "-raw", "-enc", "UTF-8",
-                                         str(pdf), "-"], timeout=18, check=True, capture_output=True)
-                text = output.stdout.decode("utf-8", errors="replace")
-            except (OSError, subprocess.SubprocessError):
-                pass
-        structured = _pdf_tables(pdf, paper, text)
-        covered = {(i["source_url"], i["label"].casefold()) for i in structured if i["kind"] == "table"}
-        captions = [i for i in _pdf_items(text, paper["pdf_url"])
-                    if (i["source_url"], i["label"].casefold()) not in covered]
-        if not text and not structured:
-            raise ValueError("未能读取 PDF 数据，请检查原文，并确认已安装 Poppler 或 pdfplumber。")
-        return structured + captions
+        return _file_evidence(papers.download_pdf(paper, work), paper)
 
 
 def extract_evidence(url: str, *, include_formulas=False) -> dict:
+    import paper_attachments
+    attachment = paper_attachments.bound_file(url)
+    if attachment:
+        item, path = attachment
+        results = _file_evidence(path, {"pdf_url": item["viewer"], "title": item["title"]})
+        for evidence in results:
+            evidence["public_source_url"] = item["paper_url"]
+            evidence["source"] += " · 用户关联的 PDF · SHA-256 " + item["id"]
+        if not results:
+            raise ValueError("这份 PDF 中未找到可核对的数据或图表。")
+        return {"title": item["title"], "url": item["paper_url"], "items": results,
+                "evidence_urls": [item["paper_url"]], "source_version": "用户确认的本地附件"}
     arxiv, external = papers._find_target(url)
     if arxiv:
         canonical = "https://arxiv.org/abs/" + arxiv
@@ -438,13 +468,15 @@ def extract_evidence(url: str, *, include_formulas=False) -> dict:
         if sample and arxiv in (base_id, sample):
             title, items = _snapshot(sample, include_formulas=include_formulas)
             return {"title": title, "url": "https://arxiv.org/abs/" + sample, "items": items}
-    elif not papers._trusted_url(external) or urlsplit(external).hostname != "aclanthology.org":
-        raise ValueError("提取数据与图表支持 arXiv 和 ACL Anthology 论文链接。")
     with tempfile.TemporaryDirectory() as work:
-        paper = papers.resolve_paper(url, work)
+        paper = papers.resolve_paper(url, work, find_pdf=True) if external else papers.resolve_paper(url, work)
     if not paper.get("pdf_url") or not paper.get("title"):
-        raise ValueError("无法从论文来源确认标题和 PDF 地址，请检查论文链接。")
+        raise ValueError(paper.get("source_note") or "暂未取得可核对的全文。可添加本地 PDF 并关联这篇论文。")
     items = _pdf_evidence(paper)
     if not items:
         raise ValueError("原文中未找到可核对的数据或图表；扫描版 PDF 可能需要 OCR。")
-    return {"title": paper["title"], "url": paper["url"], "items": items}
+    result = {"title": paper["title"], "url": paper["url"], "items": items}
+    for key in ("evidence_urls", "aliases", "source_version"):
+        if key in paper:
+            result[key] = paper[key]
+    return result

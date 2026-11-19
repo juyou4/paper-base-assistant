@@ -12,9 +12,10 @@ import webbrowser
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import model_support
+import paper_attachments
 import papers
 from table_store import FeishuTable, LarkCliTable, LocalTable, TableError
 from workflow import Conversation
@@ -27,6 +28,7 @@ WEB_TYPES = {
     "/vendor/katex/katex.min.css": "text/css", "/vendor/markdown-it/markdown-it.min.js": "text/javascript",
 }
 KATEX_FONT = re.compile(r"/vendor/katex/fonts/KaTeX_[A-Za-z0-9-]+\.woff2")
+ATTACHMENT_ROUTE = re.compile(r"/api/attachments/([0-9a-f]{64})(/bind)?")
 
 
 class Application:
@@ -58,7 +60,9 @@ class Application:
         with self.lock:
             if cookie not in self.sessions or now - self.sessions[cookie][1] > 7200:
                 self.sessions = {k: v for k,v in self.sessions.items() if now - v[1] <= 7200}
-                cookie = secrets.token_urlsafe(24)
+                if not (isinstance(cookie, str) and re.fullmatch(r"[\w-]{32}", cookie)
+                        and paper_attachments.AttachmentLibrary(self.data_dir, cookie).index.is_file()):
+                    cookie = secrets.token_urlsafe(24)
                 self.sessions[cookie] = [Conversation(self.table, self.data_dir, self.name), now]
             self.sessions[cookie][1] = now
             return cookie, self.sessions[cookie][0]
@@ -133,7 +137,12 @@ class Handler(BaseHTTPRequestHandler):
             app = self.server.app
             if method == "GET" and route.path == "/api/state":
                 cookie, chat = self.browser_session()
-                self.send_json(app.state(chat), cookie=cookie)
+                snapshot = app.state(chat)
+                snapshot["attachments"] = paper_attachments.AttachmentLibrary(app.data_dir, cookie).list()
+                self.send_json(snapshot, cookie=cookie)
+            elif route.path == "/api/attachments" or ATTACHMENT_ROUTE.fullmatch(route.path):
+                cookie, _chat = self.browser_session()
+                self.attachment_request(method, route, cookie)
             elif method == "GET" and route.path == "/api/activity":
                 ids = parse_qs(route.query).get("request_id", [])
                 if len(ids) != 1:
@@ -163,8 +172,14 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("指令需要为 1～2048 个字符。")
                 request_id = str(uuid.uuid4()) if body.get("request_id") is None else str(uuid.UUID(str(body["request_id"])))
                 run = chat.activity.begin(request_id)
-                with run.recording(), chat.lock, model_support.using_model(chat.selected_model), model_support.trace_calls() as steps:
-                    result = chat.respond(message, body.get("pending_id"), request_id)
+                with (run.recording(), chat.lock, model_support.using_model(chat.selected_model),
+                      model_support.trace_calls() as steps, paper_attachments.session_scope(app.data_dir, cookie)):
+                    options = {}
+                    if "evidence_selection" in body:
+                        if not isinstance(body["evidence_selection"], list):
+                            raise ValueError("请选择要回填的证据项。")
+                        options["evidence_selection"] = body["evidence_selection"]
+                    result = chat.respond(message, body.get("pending_id"), request_id, **options)
                     if steps:
                         result["agent"] = {**model_support.agent_info(), "steps": steps}
                 result["activity"] = run.snapshot()
@@ -198,6 +213,61 @@ class Handler(BaseHTTPRequestHandler):
         if run is not None:
             result["activity"] = run.snapshot()
         self.send_json(result, code, cookie=cookie)
+
+    def attachment_request(self, method, route, cookie):
+        app = self.server.app
+        library = paper_attachments.AttachmentLibrary(app.data_dir, cookie)
+        match = ATTACHMENT_ROUTE.fullmatch(route.path)
+        try:
+            if method == "GET" and match and not match[2]:
+                pdf = library.path(match[1])
+                self.send_body(pdf.read_bytes(), "application/pdf", extra={"Content-Disposition": 'inline; filename="paper.pdf"'})
+                return
+            if method == "POST" and not match:
+                size = int(self.headers.get("Content-Length", "0"))
+                if self.headers.get_content_type() != "application/pdf":
+                    self.send_json({"error": "附件需要为 PDF。"}, 415, cookie)
+                    return
+                if not 0 < size <= paper_attachments.MAX_BYTES:
+                    self.send_json({"error": "PDF 文件大小上限为 50 MB。"}, 413, cookie)
+                    return
+                item = library.receive(self.rfile.read(size), unquote(self.headers.get("X-Pdf-Name", "paper.pdf")))
+                self.send_json(item, cookie=cookie)
+                return
+            if method == "POST" and match and match[2]:
+                size = int(self.headers.get("Content-Length", "0"))
+                if self.headers.get_content_type() != "application/json" or not 0 < size <= 8192:
+                    raise ValueError("请指定要关联的论文。")
+                body = json.loads(self.rfile.read(size))
+                if not isinstance(body, dict):
+                    raise ValueError("请选择目标论文。")
+                library.path(match[1])
+                if set(body) == {"record_id", "expected_url"} and all(isinstance(v, str) for v in body.values()):
+                    from evidence_workflow import _field
+                    schema = app.table.schema()
+                    row = app.table.get(body["record_id"])
+                    if not row:
+                        raise ValueError("目标记录已变更，请刷新阅读清单。")
+                    fields = row["fields"]
+                    url = fields.get(_field(schema, "url")["name"])
+                    title = fields.get(_field(schema, "title")["name"])
+                    if not url:
+                        raise ValueError("请先为该条目补充论文链接。")
+                    if paper_attachments.normalize_ref(url) != paper_attachments.normalize_ref(body["expected_url"]):
+                        raise ValueError("清单中这条记录的链接已经变化，请刷新后重新选择。")
+                elif set(body) == {"paper_ref", "title"} and all(isinstance(v, str) for v in body.values()):
+                    url = paper_attachments.normalize_ref(body["paper_ref"])
+                    title = body["title"].strip()
+                    if not title:
+                        title = papers.resolve_paper(url, app.data_dir).get("title", "")
+                else:
+                    raise ValueError("请选择清单中的论文，或提供论文链接与标题。")
+                self.send_json(library.bind(match[1], url, title), cookie=cookie)
+                return
+        except FileNotFoundError:
+            self.send_json({"error": "当前会话没有这份附件。"}, 404, cookie)
+            return
+        self.send_json({"error": "找不到该资源。"}, 404, cookie)
 
 
 def main():
