@@ -1978,7 +1978,8 @@ async function submit(text) {
   const instruction = text.trim();
   if (!instruction || busy || switchingModel || refreshingState || !ready) return;
   const task = pendingId;
-  const confirm = /^确认(?:回填|写入|提交)(?:\s+[0-9a-f]{32})?[。！!]?$/.test(instruction);
+  const confirm = /^确认[。！!]?$/.test(instruction)
+    || /^确认(?:回填|写入|提交)(?:\s+[0-9a-f]{32})?[。！!]?$/.test(instruction);
   const selection = confirm && reviewSelections.has(task)
     ? reviewSelections.get(task).map(items => items.flatMap((checked, index) => checked ? [index] : []))
     : undefined;

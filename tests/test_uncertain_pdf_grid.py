@@ -59,8 +59,13 @@ class UncertainPdfGridTests(unittest.TestCase):
         figure = _pdf_items("Figure 1: Architecture of our model.", PDF)
         self.assertEqual([item["kind"] for item in figure], ["figure"])
         chat, table, token = self.preview(grid(BROKEN_CELLS, PAGE_LABEL) + figure)
-        result = chat.respond("确认回填", token)["evidence_results"][0]
+        # 只有绑定到当前预览时，简短的“确认”才能提交勾选。
+        self.assertIn("evidence_preview", chat.respond("确认"))
+        self.assertEqual(table.rows(), [])
+        receipt = chat.respond("确认", token)
+        result = receipt["evidence_results"][0]
         self.assertEqual((result["status"], result["selected_items"]), ("verified", 1))
+        self.assertEqual(chat.respond("确认", token), receipt)
         fields = table.rows()[0]["fields"]
         self.assertEqual(fields["论文链接"], PAPER)
         self.assertIn("Architecture of our model", fields["研究笔记"])

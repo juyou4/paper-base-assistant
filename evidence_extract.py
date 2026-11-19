@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import quote, urljoin, urlsplit
 
 import papers
+import proceedings_cache
 from paper_resources import html_resource_items, pdf_resource_items
 from math_evidence import FormulaReader, MathNode, formula_item
 
@@ -488,13 +489,30 @@ def extract_evidence(url: str, *, include_formulas=False, include_resources=Fals
         if not include_resources and sample and arxiv in (base_id, sample):
             title, items = _snapshot(sample, include_formulas=include_formulas)
             return {"title": title, "url": "https://arxiv.org/abs/" + sample, "items": items}
-    with tempfile.TemporaryDirectory() as work:
-        paper = papers.resolve_paper(url, work, find_pdf=True) if external else papers.resolve_paper(url, work)
-    if not paper.get("pdf_url") or not paper.get("title"):
-        raise ValueError(paper.get("source_note") or "暂未取得可核对的全文。可添加本地 PDF 并关联这篇论文。")
+    library = paper_attachments.ACTIVE.get()
+    saved = None
+    try:
+        with tempfile.TemporaryDirectory() as work:
+            paper = papers.resolve_paper(url, work, find_pdf=True) if external else papers.resolve_paper(url, work)
+        if not paper.get("pdf_url") or not paper.get("title"):
+            raise ValueError(paper.get("source_note") or "暂未取得可核对的全文。可添加本地 PDF 并关联这篇论文。")
+    except (ValueError, OSError) as exc:
+        if not external or library is None or getattr(exc.__cause__ or exc, "code", None) in (404, 410):
+            raise
+        saved = proceedings_cache.restore(library.data_dir, external)
+        if not saved:
+            raise
+        paper, path = saved
     if include_resources:
         paper = {**paper, "include_resources": True}
-    items = _pdf_evidence(paper)
+    if saved:
+        items = _file_evidence(path, paper)
+        if any(i.get("pdf_sha256") != paper["sha256"] for i in items):
+            raise ValueError("本机会议版 PDF 在提取期间发生变化，请重新核对官网原文。")
+    else:
+        items = _pdf_evidence(paper)
+        if external and library is not None:
+            proceedings_cache.remember(library.data_dir, external, paper, items)
     if not items:
         raise ValueError("原文中未找到可核对的数据或图表；扫描版 PDF 可能需要 OCR。")
     result = {"title": paper["title"], "url": paper["url"], "items": items}

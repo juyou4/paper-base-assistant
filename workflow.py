@@ -930,6 +930,11 @@ class Conversation:
 
     def respond(self, message, pending_id=None, request_id=None, evidence_selection=None, evidence_fields=None):
         with self.lock:
+            if pending_id and re.fullmatch(r"确认[。！!]?", message):
+                active = self.pending and self.pending["stage"] == "evidence_confirm" and self.pending["id"] == pending_id
+                completed = not self.pending and self.last_evidence_receipt and self.last_evidence_receipt[0] == pending_id
+                if active or completed:
+                    message = "确认回填"
             if evidence_selection is not None or evidence_fields is not None:
                 choice = EVIDENCE_DECISION.fullmatch(message)
                 if not pending_id or not choice or not choice[1].startswith("确认") or (choice[2] and choice[2] != pending_id):
