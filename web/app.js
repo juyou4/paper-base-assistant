@@ -351,6 +351,7 @@ const reviewSelections = new Map();
 const reviewFieldOverrides = new Map();
 const reviewColSelects = [];
 let selectedId = null;
+let hasVisibleRows = false;
 let viewMode = "cards";
 let latestStateRequest = 0;
 let retryableRequest = null;
@@ -694,12 +695,11 @@ function selectView(mode, animateSwitch = true, focusBtn = false) {
 }
 
 function syncViewVisibility(animateIn = false) {
-  const hasRows = state.rows.some(row => Object.values(row.fields || {}).some(hasCellValue));
   const cardsEl = byId("cards-view");
   const tableEl = byId("table-view");
   const emptyEl = byId("empty-sheet");
 
-  if (!hasRows) {
+  if (!hasVisibleRows) {
     cardsEl.hidden = true;
     tableEl.hidden = true;
     emptyEl.hidden = false;
@@ -907,9 +907,98 @@ function makeDetailRow(labelText, rawText, renderFn) {
   return wrap;
 }
 
+function matchesProgress(row) {
+  const filter = byId("reading-filter").value;
+  return !state.reading_progress || !filter || (state.reading_progress[row.id] || "待读") === filter;
+}
+
+function searchText(value) {
+  return cellValue(value).normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function renderLibraryRows() {
+  const populated = state.rows.filter(row => Object.values(row.fields || {}).some(hasCellValue));
+  const query = searchText(byId("library-query").value);
+  let wholeTerm = null;
+  if (/^[a-z0-9]{1,5}$/.test(query)) {
+    wholeTerm = new RegExp("(^|[^a-z0-9])" + query + "(?![a-z0-9])");
+  } else if (/^[a-z][a-z0-9-]*[-.]\d+(?:\.\d+)*$/.test(query)) {
+    wholeTerm = new RegExp("(^|[^a-z0-9_-])" + query.replaceAll(".", "\\.") + "(?![a-z0-9_-]|\\.\\d)");
+  }
+  const visible = populated.filter(row => {
+    if (!matchesProgress(row)) return false;
+    if (!query || state.title_aliases?.[row.id]?.includes(query)) return true;
+    return Object.values(row.fields || {}).some(value => {
+      const text = searchText(value);
+      return wholeTerm ? wholeTerm.test(text) : text.includes(query);
+    });
+  });
+  hasVisibleRows = visible.length > 0;
+  const filtered = Boolean(query || (state.reading_progress && byId("reading-filter").value));
+  byId("filter-count").textContent = filtered ? visible.length + " / " + populated.length + " 条" : "";
+  byId("reset-library-filter").hidden = !filtered;
+  renderCardsView(visible);
+  renderTableView(visible);
+  byId("empty-sheet-text").textContent = state.target_bound === false ? "请先新建多维表格"
+    : populated.length && filtered ? "没有符合当前筛选条件的论文" : "暂无论文记录";
+  byId("empty-try-btn").hidden = filtered || state.target_bound === false || Boolean(populated.length);
+  syncViewVisibility(false);
+}
+
+function resetLibraryFilter() {
+  byId("library-query").value = "";
+  byId("reading-filter").value = "";
+}
+
+function readingTools(row) {
+  const wrap = make("div", undefined, "reading-tools");
+  const current = state.reading_progress[row.id] || "待读";
+  const select = make("select", undefined, "paper-detail-pill");
+  select.setAttribute("aria-label", "阅读进度");
+  for (const label of ["待读", "在读", "已读"]) select.append(new Option(label, label));
+  select.value = current;
+  select.onchange = async () => {
+    select.disabled = true;
+    try {
+      await api("/api/reading-progress", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ record_id: row.id, expected: current, status: select.value }) });
+      showToast("阅读进度已保存到本机");
+    } catch (err) { showToast(err.message, "error"); }
+    await refreshState();
+    const fresh = state.rows.find(item => item.id === row.id);
+    if (byId("detail").open && fresh && ready) showDetail(fresh);
+    else if (byId("detail").open) byId("detail").close();
+  };
+  wrap.append(select);
+  const { urlField } = detectPrimaryFields(state.fields);
+  const rawUrl = urlField && cellValue(row.fields[urlField.name]);
+  const url = /^https?:\/\//i.test(rawUrl || "") && safeLink(rawUrl);
+  if (url && /^https?:\/\//i.test(url)) {
+    for (const [label, prompt] of [["追加笔记", "给 " + url + " 记一句："], ["补齐缺项", "补齐缺失的摘要和方法 " + url],
+                                   ["预览数据和图表", "提取数据和图表 " + url]]) {
+      const button = make("button", label, "paper-detail-pill");
+      button.type = "button";
+      button.onclick = () => {
+        if (pendingId || busy) return showToast("请先完成或取消当前操作");
+        if (byId("prompt").value.trim()) return showToast("输入框里还有草稿，请先处理草稿");
+        byId("detail").close();
+        byId("prompt").value = prompt;
+        autoResizePrompt();
+        byId("prompt").focus();
+        controls();
+      };
+      wrap.append(button);
+    }
+  }
+  return wrap;
+}
+
 function showDetail(row) {
   const list = byId("detail-content");
   list.replaceChildren();
+  if (state.reading_progress) {
+    list.append(makeDetailRow("本地阅读进度", "", dd => dd.append(readingTools(row))));
+  }
   list.append(
     makeDetailRow("记录 ID", row.id, dd => {
       dd.textContent = row.id;
@@ -921,7 +1010,7 @@ function showDetail(row) {
     const raw = cellValue(row.fields[field.name]);
     list.append(makeDetailRow(field.name, raw, dd => renderValue(dd, field, row.fields[field.name])));
   }
-  byId("detail").showModal();
+  if (!byId("detail").open) byId("detail").showModal();
 }
 
 function renderSchemaStrip() {
@@ -972,6 +1061,7 @@ function renderCardsView(populatedRows) {
       (urlField && cellValue(row.fields[urlField.name])) ||
       "未填标题";
     heading.append(make("h3", titleText, "paper-title"));
+    if (state.reading_progress) heading.append(make("small", state.reading_progress[row.id] || "待读", "reading-label"));
 
     const actions = make("div", undefined, "paper-card-actions");
     const rawUrl = urlField ? cellValue(row.fields[urlField.name]) : "";
@@ -1030,7 +1120,7 @@ function renderTableView(populatedRows) {
   const table = byId("sheet");
   table.replaceChildren();
   const headers = table.createTHead().insertRow();
-  ["#", ...state.fields.map(field => field.name)].forEach(name => {
+  ["#", ...(state.reading_progress ? ["阅读进度"] : []), ...state.fields.map(field => field.name)].forEach(name => {
     const th = make("th", name);
     th.scope = "col";
     headers.append(th);
@@ -1045,6 +1135,7 @@ function renderTableView(populatedRows) {
     btn.setAttribute("aria-label", "查看第 " + (index + 1) + " 条记录");
     btn.addEventListener("click", () => showDetail(row));
     tr.insertCell().append(btn);
+    if (state.reading_progress) tr.insertCell().textContent = state.reading_progress[row.id] || "待读";
     for (const field of state.fields) {
       const content = make("div", undefined, "sheet-cell-content");
       renderValue(content, field, row.fields[field.name]);
@@ -1078,13 +1169,9 @@ function renderState() {
   else byId("sample-pdf").removeAttribute("href");
 
   renderSchemaStrip();
-  renderCardsView(populatedRows);
-  renderTableView(populatedRows);
-
-  byId("empty-sheet-text").textContent = state.target_bound === false ? "请先新建多维表格" : "暂无论文记录";
-  byId("empty-try-btn").hidden = state.target_bound === false || Boolean(populatedRows.length);
-
-  syncViewVisibility(false);
+  byId("reading-filter").hidden = !state.reading_progress;
+  byId("export-local").hidden = !state.reading_progress;
+  renderLibraryRows();
   requestAnimationFrame(() => selectView(viewMode, false));
 }
 
@@ -1674,6 +1761,59 @@ function appendEvidenceResults(article, results) {
   article.append(list);
 }
 
+function appendSavedComparison(article, comparison) {
+  const region = make("div", undefined, "saved-comparison");
+  region.tabIndex = 0;
+  region.setAttribute("role", "region");
+  region.setAttribute("aria-label", "两篇收藏的逐项对照");
+  const table = document.createElement("table");
+  const header = table.createTHead().insertRow();
+  const heading = text => {
+    const cell = make("th", text);
+    cell.scope = "col";
+    header.append(cell);
+    return cell;
+  };
+  heading("比较项");
+  for (const paper of comparison.papers) {
+    const cell = heading("");
+    const url = safeLink(paper.url);
+    if (url) cell.append(link(paper.title || paper.url, url));
+    else cell.textContent = paper.title;
+  }
+  const body = table.createTBody();
+  for (const field of comparison.fields) {
+    const row = body.insertRow();
+    const label = make("th", field.label);
+    label.scope = "row";
+    row.append(label);
+    for (const values of field.values) {
+      const col = row.insertCell();
+      if (!values.length) col.textContent = "未保存";
+      for (const item of values) {
+        if (item.field !== field.label) col.append(make("small", item.field));
+        const content = make("div");
+        PaperRichText.render(content, item.value);
+        for (const anchor of content.querySelectorAll("a[href]")) {
+          if (anchor.textContent !== anchor.getAttribute("href")) continue;
+          anchor.title = anchor.href;
+          anchor.textContent = /\.(?:png|jpe?g|svg|webp)(?:$|[?#])/i.test(anchor.href) ? "打开原图" : "打开原文";
+        }
+        col.append(content);
+      }
+    }
+  }
+  region.append(table);
+  const expand = make("button", "展开对照", "paper-detail-pill expand-comparison");
+  expand.type = "button";
+  expand.addEventListener("click", () => {
+    byId("comparison-title").textContent = comparison.table_name + " · 论文对照";
+    byId("comparison-body").replaceChildren(region.cloneNode(true));
+    byId("comparison-detail").showModal();
+  });
+  article.append(region, expand);
+}
+
 function appendCollection(article, cards) {
   const list = make("div", undefined, "collection-list");
   const records = new Map();
@@ -1690,6 +1830,7 @@ function appendCollection(article, cards) {
       const authors = card.authors.slice(0, 3).join("、") + (card.authors.length > 3 ? " 等" : "");
       block.append(make("small", [authors, card.year, card.reading_status, card.version].filter(Boolean).join(" · ")));
       if (card.notice) block.append(make("small", card.notice));
+      if (card.saved_summary) block.append(make("small", card.saved_summary));
       const links = make("div", undefined, "collection-links");
       for (const raw of card.sources) {
         const address = safeLink(raw);
@@ -1765,13 +1906,17 @@ async function submit(text) {
     finishActivity(result.activity);
     pendingId = result.pending_id || null;
 
-    const { article } = appendMessage(result.message || "已完成。", "assistant");
+    const comparison = result.saved_comparison;
+    const { article } = appendMessage(comparison ? "已从「" + comparison.table_name + "」读取两篇收藏的对应字段。"
+      : result.message || "已完成。", "assistant");
+    if (comparison) appendSavedComparison(article, comparison);
     appendModelTrace(article, result.agent);
     if (result.target_changed) {
       selectedId = reviewId = null;
+      resetLibraryFilter();
       reviewSelections.clear();
       reviewFieldOverrides.clear();
-      document.querySelectorAll(".review-reopen").forEach(button => { button.disabled = true; });
+      document.querySelectorAll(".review-reopen, .open-saved-row").forEach(button => { button.disabled = true; });
       showEvidence([]);
       const target = feishuTableLink(result.workspace_url);
       if (target) article.append(iconLink("打开飞书数据表", target, "icon-pill"));
@@ -1796,6 +1941,25 @@ async function submit(text) {
       article.append(pdfWrap);
     }
 
+    if (result.saved_record_id) {
+      selectedId = result.saved_record_id;
+      const open = make("button", "查看表中记录", "paper-detail-pill open-saved-row");
+      open.type = "button";
+      open.onclick = async () => {
+        if (open.getAttribute("aria-busy") === "true") return;
+        open.setAttribute("aria-busy", "true");
+        try {
+          await refreshState();
+          if (!ready || open.disabled) return;
+          const row = state.rows.find(item => item.id === result.saved_record_id);
+          if (row) showDetail(row);
+          else showToast("当前表已找不到这条记录，请重新查询。", "error");
+        } finally {
+          open.removeAttribute("aria-busy");
+        }
+      };
+      article.append(open);
+    }
     if (result.row) selectedId = result.row.id;
     const incomplete = result.evidence_results?.some(item => !["verified", "excluded"].includes(item.status));
 
@@ -2024,6 +2188,27 @@ window.addEventListener("pageshow", event => {
   if (event.persisted && !busy && !switchingModel) refreshState();
 });
 byId("refresh").addEventListener("click", () => refreshState(true));
+byId("reading-filter").addEventListener("change", renderLibraryRows);
+byId("library-query").addEventListener("input", renderLibraryRows);
+byId("reset-library-filter").addEventListener("click", () => {
+  resetLibraryFilter();
+  renderLibraryRows();
+  byId("library-query").focus();
+});
+byId("export-local").addEventListener("click", async () => {
+  try {
+    const snapshot = await api("/api/state");
+    if (!snapshot.reading_progress) throw new Error("请先打开本地阅读清单");
+    const rows = snapshot.rows.map(row => ({...row, reading_progress: snapshot.reading_progress[row.id] || "待读"}));
+    const file = { table: snapshot.table_name, exported_at: new Date().toISOString(), fields: snapshot.fields, rows };
+    const url = URL.createObjectURL(new Blob([JSON.stringify(file, null, 2)], {type: "application/json"}));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = (snapshot.table_name || "阅读清单").replace(/[<>:"/\\|?*]/g, "_") + ".json";
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  } catch (err) { showToast(err.message, "error"); }
+});
 const reviewDialog = byId("evidence-review");
 byId("review-close").addEventListener("click", () => reviewDialog.close());
 for (const [id, instruction] of [["review-cancel", "取消回填"], ["review-confirm", "确认回填"]]) {
@@ -2035,6 +2220,10 @@ for (const [id, instruction] of [["review-cancel", "取消回填"], ["review-con
   });
 }
 byId("close-detail").addEventListener("click", () => byId("detail").close());
+byId("close-comparison").addEventListener("click", () => byId("comparison-detail").close());
+byId("comparison-detail").addEventListener("click", event => {
+  if (event.target === byId("comparison-detail")) byId("comparison-detail").close();
+});
 byId("detail").addEventListener("click", event => {
   if (event.target === byId("detail")) byId("detail").close();
 });

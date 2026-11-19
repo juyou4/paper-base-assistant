@@ -243,6 +243,10 @@ class LocalTable:
                     id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL,
                     record_id TEXT NOT NULL, action TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS demo_reading_progress (
+                    record_id TEXT PRIMARY KEY REFERENCES demo_papers(id),
+                    status TEXT NOT NULL CHECK(status IN ('待读','在读','已读'))
+                );
             """)
             self._db.execute("BEGIN IMMEDIATE")
             if not self._db.execute("SELECT 1 FROM demo_columns LIMIT 1").fetchone():
@@ -404,6 +408,26 @@ class LocalTable:
             self._db.execute("INSERT INTO demo_columns VALUES (?,?,?)", (field_id, name, kind))
             self._save_role_changes(role_changes)
             return {"id": field_id, "name": name, "type": kind}
+
+    def reading_progress(self):
+        with self._lock:
+            return dict(self._db.execute("SELECT record_id,status FROM demo_reading_progress"))
+
+    def set_reading_progress(self, record_id, expected, status):
+        states = ("待读", "在读", "已读")
+        if expected not in states or status not in states:
+            raise TableError("请选择待读、在读或已读。")
+        with self._lock, self._db:
+            self._db.execute("BEGIN IMMEDIATE")
+            self.get(record_id)
+            prior = self._db.execute("SELECT status FROM demo_reading_progress WHERE record_id=?",
+                                     (record_id,)).fetchone()
+            current = prior[0] if prior else "待读"
+            if current == status:
+                return
+            if current != expected:
+                raise TargetChanged("阅读进度已被更新，请刷新后再选择。")
+            self._db.execute("INSERT OR REPLACE INTO demo_reading_progress VALUES(?,?)", (record_id, status))
 
     def rows(self):
         with self._lock:

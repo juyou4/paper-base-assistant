@@ -18,7 +18,8 @@ import model_support
 import paper_attachments
 import papers
 from table_store import FeishuTable, LarkCliTable, LocalTable, TableError
-from workflow import Conversation
+from workflow import Conversation, _fields
+from title_aliases import title_alias_terms
 from workspace_actions import target_link
 
 
@@ -82,6 +83,10 @@ class Application:
             bound = bool(getattr(table, "table_id", True))
             link = target_link(table, chat.base_url) if chat else self.feishu_url
             fields, rows = (table.schema(), table.rows()) if bound else ([], [])
+            titles = [col["name"] for col in _fields(fields, "title")]
+            aliases = {row["id"]: terms for row in rows if (terms := title_alias_terms(
+                next((row["fields"][name] for name in titles if row["fields"].get(name)), "")))}
+            reading = table.reading_progress() if bound and isinstance(table, LocalTable) else None
             base_name = chat.base_name if chat else self.base_name
             pending = chat.pending if chat else None
             dialog = None
@@ -94,7 +99,7 @@ class Application:
             workspace_pending = dialog if pending and pending["stage"] in {"workspace_name", "workspace_create"} else None
         return {"mode": "local" if self.mode == "local" else "feishu", "table_name": name,
                 "target_bound": bound, "base_name": base_name, "workspace_pending": workspace_pending, "pending_dialog": dialog,
-                "fields": fields, "rows": rows,
+                "fields": fields, "rows": rows, "reading_progress": reading, "title_aliases": aliases,
                 "sample": {"title": papers.SAMPLE["title"], "url": "https://arxiv.org/abs/" + papers.SAMPLE_ID},
                 "download_url": "/api/sample.pdf", "feishu_url": link,
                 "capabilities": {"model": agent["enabled"], "agent": agent, "activity": True}}
@@ -180,7 +185,7 @@ class Handler(BaseHTTPRequestHandler):
                 request_id = str(uuid.UUID(ids[0]))
                 cookie, chat = self.browser_session()
                 self.send_json(chat.activity.snapshot(request_id), cookie=cookie)
-            elif method == "POST" and route.path in {"/api/chat", "/api/model"}:
+            elif method == "POST" and route.path in {"/api/chat", "/api/model", "/api/reading-progress"}:
                 if self.headers.get_content_type() != "application/json":
                     self.send_json({"error": "请求体需要为 JSON。"}, 415)
                     return
@@ -190,6 +195,16 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 body = json.loads(self.rfile.read(length))
                 cookie, chat = self.browser_session()
+                if route.path == "/api/reading-progress":
+                    if (not isinstance(body, dict) or set(body) != {"record_id", "expected", "status"}
+                            or not all(isinstance(v, str) for v in body.values())):
+                        raise ValueError("请指定当前记录和阅读进度。")
+                    with chat.lock:
+                        if not isinstance(chat.table, LocalTable):
+                            raise ValueError("该操作适用于本地阅读清单。")
+                        chat.table.set_reading_progress(body["record_id"], body["expected"], body["status"])
+                    self.send_json({"status": body["status"]}, cookie=cookie)
+                    return
                 if route.path == "/api/model":
                     if not isinstance(body, dict) or set(body) != {"model"}:
                         raise ValueError("请选择一个模型。")
@@ -317,13 +332,21 @@ def main():
     parser.add_argument("--model", help="交给推理后端的模型名称")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
+    parser.add_argument("--demo", action="store_true", help="打开独立的本地示例清单，含两篇已核对出处的论文")
     parser.add_argument("--open", action="store_true", help="启动后打开本机浏览器")
     args = parser.parse_args()
+    if args.demo:
+        if args.mode != "local":
+            parser.error("--demo 适用于本地清单，请使用 --mode local。")
+        from demo_library import prepare_demo
+        args.data_dir = prepare_demo(args.data_dir / "interview-demo")
     if args.agent:
         os.environ["PAPER_AGENT_PROVIDER"] = args.agent
     if args.model:
         os.environ["PAPER_MODEL_NAME"] = args.model
     app = Application(args.mode, args.data_dir)
+    if args.demo:
+        app.name = "论文研读示例"
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     server.app = app
     url = f"http://127.0.0.1:{server.server_port}"

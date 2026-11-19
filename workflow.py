@@ -8,13 +8,14 @@ from urllib.parse import urlencode, urlsplit
 import papers
 import model_support
 import source_library
+import saved_focus
 from activity import History
 from activity import step
 from dialog_choices import resolve_choice
 from paper_selection import paper_positions, separate_paper_clauses, without_positions
 import paper_search_dialog
 from preflight import verify_write
-from table_store import RecordNotFound, TableError, _identity
+from table_store import LocalTable, RecordNotFound, TableError, _identity
 
 
 ROLES = {
@@ -261,6 +262,8 @@ class Conversation:
         self.workspace_receipt = None
         self.last = None
         self.last_title = ""
+        self.last_library_results = None
+        saved_focus.clear(self)
         self.pending = None
         self.last_evidence_receipt = None
         self.recent_evidence = None
@@ -275,6 +278,8 @@ class Conversation:
         self.base_name, self.base_url = base_name, base_url
         self.table_tool = getattr(table, "tool_name", None)
         self.last = self.last_title = self.pending = None
+        self.last_library_results = None
+        saved_focus.clear(self)
         self.last_evidence_receipt = self.recent_evidence = None
         self.recent_saved = []
         self.collection_batch = []
@@ -570,6 +575,9 @@ class Conversation:
     def _commit(self, plan):
         paper = plan["paper"]
         schema = self._read_schema()
+        guard = plan.get("fill_guard")
+        if guard and any(field not in schema for field in guard["schema"]):
+            raise ValueError("目标字段已变化，请重新查看这篇论文的缺项。")
         for slot in plan["slots"]:
             if slot.get("skip"):
                 continue
@@ -659,6 +667,12 @@ class Conversation:
                 expected_id = source_library.version_target_id(self.table, existing["id"], plan["request_id"])
                 options.update(expected_record_id=expected_id, expected_fields=version_fields)
             target_key = plan.get("target_key") or paper["key"]
+            if guard:
+                if not any(_identity(paper["url"]) == _identity(url) for url in guard["sources"]):
+                    raise ValueError("原文来源与已存论文不一致，请先核对记录。")
+                target_key = _identity(guard["anchor"])
+                options.update(update_only=True, expected_record_id=guard["record_id"],
+                               expected_fields={**version_fields, **guard["before"]})
             if plan.get("append_note"):
                 schema_by_name = {f["name"]: f["type"] for f in schema}
                 with self.table._lock:
@@ -717,7 +731,34 @@ class Conversation:
         self.last_title = paper.get("title") or paper["url"]
         self.recent_evidence = None
         self.recent_saved = [self.last]
+        if values:
+            saved_focus.remember_row(self, row, schema)
         return answer
+
+    def _revisit_local(self, url):
+        with self.table._lock:
+            if not self.table._db.execute("SELECT 1 FROM demo_papers WHERE paper_key=?",
+                                          (_identity(url),)).fetchone():
+                return None
+            matched = source_library.existing_record(self.table, [url])
+            if matched and url == matched[1]:
+                row = self.table.get(matched[0]["id"], paper_key=url)
+                schema = self._read_schema()
+                title = next((row["fields"][f["name"]] for f in _fields(schema, "title")
+                              if row["fields"].get(f["name"])), "")
+                if title:
+                    meta = source_library.stored_metadata(self.table, row, url)
+                    sources = source_library.known_sources(self.table, row, url)
+                    card = source_library.card({**meta, "title": title, "url": url}, sources or [url], row)
+                    filled = [f["name"] for f in schema if row["fields"].get(f["name"])]
+                    status = self.table.reading_progress().get(row["id"], "待读")
+                    self.last, self.last_title, self.recent_saved = url, title, [url]
+                    self.collection_batch, self.pending, self.recent_evidence = [], None, None
+                    saved_focus.remember_row(self, row, schema)
+                    card["saved_summary"] = f"{status} · 已有{'、'.join(filled)}"
+                    return {"message": f"已收藏《{title}》，继续使用原记录。{card['saved_summary']}。可直接给这篇补笔记或预览图表。",
+                            "verification": "已按论文标识回读本地原记录", "row": row, "collection": [card]}
+        return None
 
     def _load(self, message, plan):
         urls = _evidence_urls(message)
@@ -725,6 +766,14 @@ class Conversation:
             raise ValueError("请明确指定一篇要操作的论文。")
         url = urls[0]
         plan.pop("target_key", None)
+        # 重访本地清单的原链接时，直接核对已有行；新增入口或不同修订仍需解析。
+        if (isinstance(self.table, LocalTable) and not plan.get("download") and not plan.get("update_only")
+                and any(s["kind"] == "url" for s in plan["slots"])
+                and all(not s.get("hint") and (s["kind"] == "url" or s.get("optional") and s["kind"] == "title")
+                        for s in plan["slots"])):
+            cached = self._revisit_local(url)
+            if cached:
+                return cached
         if plan.get("update_only"):
             # 修改用户指定的单元格只需定位论文，直接使用链接或编号，无需抓取论文内容。
             url = source_library.existing_source(self.table, [url]) or url
@@ -758,10 +807,41 @@ class Conversation:
                                                           f"已作为来源收藏。当前记录和全文仍指向 {pinned}。")
                             else:
                                 paper = {**paper, "url": anchor, "key": _identity(anchor)}
+                            if isinstance(self.table, LocalTable):
+                                titles = _fields(self._read_schema(), "title")
+                                if len(titles) == 1 and existing["fields"].get(titles[0]["name"]):
+                                    paper["title"] = existing["fields"][titles[0]["name"]]
                     plan["paper"] = paper
                     return self._commit(plan)
         plan["paper"] = paper
         return self._commit(plan)
+
+    def _fill_missing(self, urls, request_id):
+        if len(urls) != 1:
+            return {"message": "请指定一篇已收藏论文的链接，再补齐缺项。"}
+        with self.table._lock:
+            match = source_library.existing_record(self.table, urls)
+            if not match:
+                return {"message": "当前表里没有这篇论文，请先收藏。"}
+            row, anchor = match
+            schema = self._read_schema()
+            slots, watched = [], []
+            before = {name: val for name, val in row["fields"].items() if val == anchor}
+            for kind in ("abstract", "method"):
+                fields = _fields(schema, kind)
+                if len(fields) > 1:
+                    return {"message": f"表中有多个{LABEL[kind]}候选列，请用“把{LABEL[kind]}写进指定列”明确目标。"}
+                if fields and not row["fields"].get(fields[0]["name"]):
+                    field = fields[0]
+                    watched.append(field)
+                    before[field["name"]] = row["fields"].get(field["name"], "")
+                    slots.append({"kind": kind, "hint": field["name"], "optional": False})
+            if not slots:
+                return {"message": "这条记录没有可补写的空白摘要或方法列。已有内容已保留。", "row": row}
+            sources = [anchor, *source_library.known_sources(self.table, row, anchor)]
+        guard = {"record_id": row["id"], "anchor": anchor, "before": before, "schema": watched, "sources": sources}
+        return self._load(anchor, {"slots": slots, "download": False, "english": False, "fill_guard": guard,
+                                   "request_id": request_id or uuid.uuid4().hex})
 
     def _collect_batch(self, urls, request_id):
         if len(urls) == 1:
@@ -783,6 +863,7 @@ class Conversation:
                 cards[url] = {"url": url, "title": url, "error": str(error)}
                 references[url] = url
         self.last = self.last_title = self.pending = self.recent_evidence = None
+        saved_focus.clear(self)
         # “第几篇”按实际展示的论文卡片排序，不能指向已合并的重复入口。
         self.recent_saved = list(references.values())
         self.collection_batch = list(self.recent_saved)
@@ -841,8 +922,27 @@ class Conversation:
                     raise ValueError("当前没有可逐项确认的证据预览。")
             if pending_id and self.pending and pending_id != self.pending["id"]:
                 raise ValueError("上一项确认已经结束，请使用当前预览。")
+            if self.last_library_results:
+                from library_search import is_result_reference, open_result
+                if is_result_reference(message):
+                    opened = open_result(self, message, pending_id)
+                    if opened is not None:
+                        return opened
+                else:
+                    self.last_library_results = None
             literal_note = NOTE_TEXT.fullmatch(message.strip())
             has_note_body = literal_note or QUOTED_NOTE.search(message)
+            if (isinstance(self.table, LocalTable) and not self.pending and not pending_id and not has_note_body
+                    and re.fullmatch(r"(?:请|帮我)?补齐(?:刚才那篇|这篇)?(?:缺失的?|空白的?)?摘要和方法[。！! ]*",
+                                     EVIDENCE_REFERENCES.sub(" ", message).strip())):
+                return self._fill_missing(_evidence_urls(message) or ([self.last] if self.last else []), request_id)
+            if (isinstance(self.table, LocalTable) and not self.pending and not pending_id
+                    and not has_note_body and re.fullmatch(r"(?:收藏|保存|收录)[。！! ]*", EVIDENCE_REFERENCES.sub(" ", message).strip())):
+                urls = _evidence_urls(message)
+                if len(urls) == 1:
+                    cached = self._revisit_local(urls[0])
+                    if cached:
+                        return cached
             if not has_note_body:
                 from workspace_actions import handle_workspace
                 workspace = handle_workspace(self, message, pending_id)
@@ -852,6 +952,15 @@ class Conversation:
                 return {"message": "请先创建一个多维表格文件，例如“新建多维表格「论文资料库」”。"}
             from intent_guard import guard_paper_request
             from admin_dialog import infer_table_lookup, table_lookup_kind
+            if not has_note_body and not REFERENCE.search(message) and (self.pending or not pending_id):
+                from saved_compare import handle as compare_saved
+                comparison = compare_saved(self, message)
+                if comparison is not None:
+                    return comparison
+                from saved_paper_dialog import handle as revisit_by_title
+                saved = revisit_by_title(self, message, pending_id)
+                if saved is not None:
+                    return saved
             can_query = not has_note_body and (self.pending or not pending_id) and (
                 not self.pending or message not in self.pending.get("choices", ()))
             lookup = table_lookup_kind(message, self.table_name) if can_query else None
@@ -866,6 +975,24 @@ class Conversation:
                 if guarded is not None:
                     return guarded
             if can_query:
+                progress_query = re.fullmatch(r"(?:看看|列出|查看|查一下|我想看)?(?:我)?(待读|还没读|未读|在读|正在读|已读|读完了?)(?:的)?(?:论文|文献)(?:有哪些)?[？?。]?", message)
+                if isinstance(self.table, LocalTable) and progress_query:
+                    label = progress_query[1]
+                    status = ("待读" if label in ("还没读", "未读") else "在读" if label == "正在读"
+                              else "已读" if label.startswith("读完") else label)
+                    columns = self._read_schema()
+                    names = [f["name"] for role in ("title", "url") for f in _fields(columns, role)]
+                    with self.table._lock:
+                        progress = self.table.reading_progress()
+                        titles = [next((r["fields"][n] for n in names if r["fields"].get(n)), "")
+                                  for r in self.table.rows() if progress.get(r["id"], "待读") == status]
+                    titles = [t for t in titles if t]
+                    reply = {"message": f"「{self.table_name}」有 {len(titles)} 篇{status}论文。" +
+                             "".join(f"\n{i}. {t}" for i, t in enumerate(titles[:20], 1)) +
+                             ("\n显示前 20 篇。" if len(titles) > 20 else "")}
+                    if self.pending:
+                        reply.update(pending_id=self.pending["id"], choices=self.pending.get("choices", []))
+                    return reply
                 lookup = lookup or infer_table_lookup(message, self.table_name)
                 # 原有模型字段查询保留其规划、工具追踪；离线模式也能回答相同的口语提问。
                 from agent_router import is_candidate

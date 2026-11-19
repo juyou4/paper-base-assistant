@@ -2,6 +2,27 @@
 
 用中文把论文存进飞书多维表格。助手先读取当前表的真实列名和类型，有多个候选列时主动追问，写入后再按记录 ID 回读核对；输入框支持切换模型，消息下方可实时查看工具调用、状态和耗时。也可以直接用内置的 SQLite 阅读清单体验完整流程。
 
+本地模式默认把清单保存在项目的 `data/records.sqlite3`，其他本地数据表使用同一数据目录下的独立库。下次从同一项目启动即可继续阅读；使用 `--data-dir` 时请沿用同一路径。已有记录默认显示“待读”。打开“详情”可标为“在读”或“已读”，也可以给这条记录追加笔记、预览图表，或发送“补齐缺失的摘要和方法”来补写空白字段。清单支持按进度筛选；“导出当前表”会保存一份包含全表字段、记录和阅读进度的 JSON。阅读进度只保存在本机。
+
+## 体验已有论文的研读流程
+
+在项目目录运行以下命令，即可打开含两篇公开论文、四条带出处证据的独立示例清单。macOS 可将 `python` 换成 `python3`。示例保存在 `data/interview-demo/`，再次启动可继续使用自己补过的笔记和阅读进度。
+
+```sh
+python app.py --mode local --demo --agent rules --open
+```
+
+| 在对话框输入 | 可以现场核对什么 |
+| --- | --- |
+| 再看看 RAG | 打开已收藏的《Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks》，显示简称对应的题名原文。也可输入“再看看 attention”。 |
+| 它的阅读笔记呢 | 按刚打开的记录 ID 重新读取对应列，可看到原文表格、指标及出处。“查看表中记录”可打开该行详情。 |
+| 在我的清单里搜 指标 | 看哪些记录的笔记包含这个词。接着说“打开第二篇”，按屏幕上刚展示的顺序选择。 |
+| 对比我收藏的《RAG》和《Attention》的关键数据和图表 | 并排查看两条记录已保存的指标、图题和原文链接。每个数字保留各自的数据集或评测名，缺项显示“未保存”。 |
+
+清单上方的搜索框可即时筛选题名、简称、摘要和笔记，本地模式还可叠加阅读进度。对话中的简称来自可见题名本身。多篇匹配时先选记录，未找到时可以扩大到笔记或切换数据表。另开对话后可以重新按题名定位。要检索新的论文，可以明确说“去网上找几篇关于 attention 的论文”。
+
+示例复用了批量提取后逐项确认的结果。RAG 保存了 Table 1 的 RAG-Seq. / NQ 数值 44.5，Attention 保存了 Table 2 的 Transformer (big) / EN-DE BLEU 数值 28.4，两篇各保存一张 Figure 1。要从零体验提取与提交，可用普通本地模式或已授权的飞书表。将两条论文链接和“提取这两篇的指标和图表”一起发出，在预览中逐篇勾选，再确认写入。
+
 **真实环境验证**：
 - **论文录入与回读**：已在真实飞书测试表录入《Attention Is All You Need》（方法摘自第 3 节）和 BART。录入 BART 时从 PDF 第 2 页提取了 362 个字符的英文方法段并补入同一条记录，随后用飞书官方 CLI `base +record-get` 按记录 ID 回读，与原文和官网地址一致。[BART 原文第 2 页](https://aclanthology.org/2020.acl-main.703.pdf#page=2) · [Attention 原文第 3 节](https://arxiv.org/html/1706.03762#S3) · [Windows 与 Linux 自动测试](https://github.com/juyou4/paper-base-assistant/actions/workflows/test.yml)
 - **字段与权限操作**：2026 年 11 月 18 日在同一测试表通过对话完成空文本列的新建、按字段 ID 查询、改名回读与删除（字段数 7 → 8 → 7，6 条已有记录的 ID 与其余字段定义未受影响）；协作者和高级角色变更通过本地示例与模拟官方 API 响应验收，未改动真实租户的人员权限。
@@ -230,13 +251,14 @@ flowchart LR
 - `workflow.py` 管理多轮对话状态、目标列选择与提交流程，各浏览器会话维护独立的待确认任务；`intent_guard.py` 与 `paper_selection.py` 负责论文写表意图边界与序号定位。
 - `evidence_extract.py` 把原文整理为带出处的指标、表格和图，`math_evidence.py` 读取数学源码、编号和出处。`evidence_workflow.py` 支持多篇并发提取、预览内自定义目标列校验，以及按用户确认批次提交与回读。
 - `base_files.py`、`base_table_dialog.py`、`workspace_actions.py` 处理多维表格与数据表的创建、字段规划及会话内切表；`library_search.py`、`library_search_intent.py`、`paper_search_dialog.py` 负责表内检索与 Crossref 公开题录搜索。
+- `title_aliases.py` 从题名生成可追溯的简称。`saved_paper_dialog.py` 和 `saved_focus.py` 按当前表与记录 ID 回读单篇，`saved_compare.py` 按两篇记录的实际字段生成并排对照。
 - `activity.py` 按会话和请求编号记录工具调用，供浏览器实时轮询进度并在失败时定位对应操作。
 - `preflight.py` 负责提交前核验；`admin_dialog.py` 解析管理意图，字段、协作者与高级角色变更分别由 `schema_admin.py`、`collaborator_admin.py` 和 `role_admin.py` 处理。
 - `papers.py`、`pdf_sections.py`、`paper_attachments.py` 负责论文解析、PDF 下载、本地附件关联和证据提取，同一 arXiv 编号的不同版本默认归入同一篇文章。
 - `table_store.py` 封装 SQLite、飞书应用和飞书 CLI 三种后端；更新时仅提交本次要求的字段，业务查重拦截重复指令，原生飞书新增请求通过持久化的幂等令牌处理传输重试。
 - `model_support.py` 与 `intent_model.py` 为可选的模型提取及意图识别入口，飞书令牌和模型密钥均留在服务端。
 
-运行离线测试（当前共 322 项 Python 单元测试 + 5 项前端富文本测试）：
+运行后端回归和前端富文本测试：
 
 ```sh
 python -m unittest discover -s tests -v

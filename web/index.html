@@ -240,6 +240,10 @@
             </div>
 
             <div class="records-toolbar">
+              <select id="reading-filter" class="paper-detail-pill" aria-label="筛选本地阅读进度" hidden>
+                <option value="">全部进度</option><option>待读</option><option>在读</option><option>已读</option>
+              </select>
+              <button type="button" id="export-local" class="paper-detail-pill" hidden>导出当前表</button>
               <a class="icon-pill feishu-link" id="feishu-link" target="_blank" rel="noopener noreferrer" hidden>
                 打开飞书表格
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -269,6 +273,12 @@
                 <span>刷新</span>
               </button>
             </div>
+          </div>
+
+          <div class="library-search" role="search" aria-label="筛选当前表">
+            <input id="library-query" type="search" aria-label="筛选当前表的论文" placeholder="在当前表搜题名、简称或笔记" autocomplete="off" aria-controls="records-stage">
+            <button type="button" class="paper-detail-pill" id="reset-library-filter" hidden>清除筛选</button>
+            <span id="filter-count" role="status"></span>
           </div>
 
           <!-- 字段胶囊条 -->
@@ -358,6 +368,16 @@
         <button type="button" class="icon-pill" id="review-cancel">取消</button>
         <button type="button" class="send-pill" id="review-confirm">确认写入</button>
       </footer>
+    </div>
+  </dialog>
+
+  <dialog id="comparison-detail" aria-labelledby="comparison-title">
+    <div class="detail-shell">
+      <div class="detail-head">
+        <h2 id="comparison-title">论文对照</h2>
+        <button type="button" class="icon-pill close-btn" id="close-comparison" aria-label="关闭论文对照">关闭</button>
+      </div>
+      <div id="comparison-body"></div>
     </div>
   </dialog>
 

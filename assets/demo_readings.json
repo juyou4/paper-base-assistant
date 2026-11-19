@@ -1,0 +1,14 @@
+[
+  {
+    "论文标题": "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
+    "论文链接": "https://arxiv.org/abs/2005.11401v4",
+    "阅读笔记": "【指标】RAG-Seq. · NQ · 44.5\n出处：arXiv HTML · Table 1  https://arxiv.org/html/2005.11401v4#S4.T2.fig1",
+    "研究笔记": "【图】Figure 1 · Overview of our approach.\n出处：arXiv HTML · Figure 1  https://arxiv.org/html/2005.11401v4#S1.F1\n原图：https://arxiv.org/html/2005.11401v4/RAG-Architecture.svg"
+  },
+  {
+    "论文标题": "Attention Is All You Need",
+    "论文链接": "https://arxiv.org/abs/1706.03762v7",
+    "阅读笔记": "【指标】Transformer (big) · BLEU / EN-DE · 28.4\n出处：arXiv HTML · Table 2  https://arxiv.org/html/1706.03762v7#S6.T2",
+    "研究笔记": "【图】Figure 1 · The Transformer - model architecture.\n出处：arXiv HTML · Figure 1  https://arxiv.org/html/1706.03762v7#S3.F1\n原图：https://arxiv.org/html/1706.03762v7/Figures/ModalNet-21.png"
+  }
+]

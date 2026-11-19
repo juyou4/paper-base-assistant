@@ -5,6 +5,7 @@ import unicodedata
 
 from activity import step
 import paper_search_dialog
+from title_aliases import match_title_alias
 
 
 LOCAL = "查当前阅读清单"
@@ -27,6 +28,7 @@ _TERM = re.compile(r"[\w][\w\s.+#&:'’/\-()]{0,158}[\w+#)]|[A-Za-z\u4e00-\u9fff
 _QUOTES = {"《": "》", "「": "」", "“": "”", '"': '"'}
 _CHOOSE_LOCAL = re.compile(r"(?:那就|就|先|只)?(?:查|搜|看)?(?:一下)?(?:当前阅读清单|(?:我(?:的)?)?(?:收藏(?:夹|的)?|清单)|我的|飞书表里|表里)(?:面)?(?:看看|找找|就好|吧)?")
 _CHOOSE_PUBLIC = re.compile(r"(?:那就|就|先|只)?(?:去|查|搜|看)?(?:一下)?(?:公开论文题录|公开题录|公开的|网上|全网|Crossref)(?:搜(?:搜)?|查查|找找|看看)?(?:吧)?", re.I)
+_OPEN_SINGLE = re.compile(r"(?:打开|看看|查看|看一下)(?:这篇|这一篇|这条|唯一的那篇)(?:论文|记录)?[吧。！! ]*")
 
 
 def request(message):
@@ -78,41 +80,121 @@ def _clean(value):
     return " ".join(unicodedata.normalize("NFKC", str(value or "")).split())
 
 
-def search_table(chat, term):
+def _result_context(chat, task):
+    return (chat.table, getattr(chat.table, "app_token", ""), getattr(chat.table, "table_id", ""),
+            chat.last, chat.last_title, task and task["id"], task and task["stage"])
+
+
+def remember_results(chat, identities, task):
+    chat.last_library_results = {"context": _result_context(chat, task), "rows": identities}
+
+
+def is_result_reference(message):
+    from saved_paper_dialog import read_ordinal
+    return read_ordinal(message) is not None or bool(_OPEN_SINGLE.fullmatch(message.strip()))
+
+
+def open_result(chat, message, pending_id):
+    results = getattr(chat, "last_library_results", None)
+    if not results:
+        return None
+    task = chat.pending
+    if results["context"] != _result_context(chat, task):
+        chat.last_library_results = None
+        return None
+    if pending_id != (task["id"] if task else None):
+        return None
+    from saved_paper_dialog import open_saved_identity, read_ordinal
+    index = read_ordinal(message)
+    shown = len(results["rows"])
+    if index is None:
+        if not _OPEN_SINGLE.fullmatch(message.strip()):
+            return None
+        index = 0 if shown == 1 else -1
+    if not 0 <= index < shown:
+        text = f"刚才列出了 {shown} 条匹配记录。请按显示的序号选择，例如“打开第1篇”。"
+        reply = {"message": text}
+        if task:
+            reply.update(pending_id=task["id"], choices=task.get("choices", []))
+        return reply
+    reply = open_saved_identity(chat, results["rows"][index], pending=task)
+    if reply.get("saved_record_id"):
+        # 打开同一结果列表中的记录后，仍可翻看这个列表的另一条。
+        results["context"] = _result_context(chat, task)
+        chat.last_library_results = results
+    else:
+        chat.last_library_results = None
+    return reply
+
+
+def _matching_field(fields, searchable, titles, term, needle, boundary):
+    for name in searchable:
+        value = _clean(fields.get(name))
+        folded = value.casefold()
+        if boundary:
+            match = boundary.search(folded)
+            index = match.start() if match else -1
+        else:
+            index = folded.find(needle)
+        if index >= 0:
+            if name in titles:
+                return name, ""
+            start, stop = max(0, index - 24), min(len(value), index + len(needle) + 44)
+            return name, ("…" if start else "") + value[start:stop] + ("…" if stop < len(value) else "")
+        if name in titles and (alias := match_title_alias(term, fields.get(name))):
+            return name, f"{term} 对应题名中的 “{alias.evidence}”。"
+    return None
+
+
+def search_table(chat, term, *, source_selected=False):
+    from saved_paper_dialog import _bind, _identity
     from workflow import ROLES, _fields
 
+    chat.last_library_results = None
+    task = None if source_selected else chat.pending
+    if not task:
+        _bind(chat)
     schema = chat._read_schema()
     names = {role: [f["name"] for f in _fields(schema, role)] for role in ROLES}
     searchable = list(dict.fromkeys(names["title"] + names["abstract"] + names["method"] + names["note"]))
     if not searchable or not (names["title"] or names["url"]):
         return {"message": f"「{chat.table_name}」需要有论文标题或链接，以及可检索的标题、摘要、方法或笔记文本列。"}
     needle = _clean(term).casefold()
+    boundary = (re.compile(r"(?<![a-z0-9])" + re.escape(needle) + r"(?![a-z0-9])")
+                if re.fullmatch(r"[a-z0-9]{1,5}", needle) else None)
+    if re.fullmatch(r"[a-z][a-z0-9-]*[-.]\d+(?:\.\d+)*", needle):
+        boundary = re.compile(r"(?<![\w-])" + re.escape(needle) + r"(?![\w-]|\.\d)")
     with step("按关键词筛选当前表的可见论文", tool=chat.table_tool):
         rows = chat.table.rows()
         hits = []
+        count = 0
+        alias_count = 0
         for row in rows:
             fields = row["fields"]
-            title = next((_clean(fields.get(k)) for k in names["title"] if fields.get(k)), "")
-            url = next((_clean(fields.get(k)) for k in names["url"] if fields.get(k)), "")
+            title, url = _identity(row, names["title"], names["url"])
             if not (title or url):
                 continue
-            for name in searchable:
-                value = _clean(fields.get(name))
-                index = value.casefold().find(needle)
-                if index >= 0:
-                    start = max(0, index - 24)
-                    stop = min(len(value), index + len(needle) + 44)
-                    excerpt = ("…" if start else "") + value[start:stop] + ("…" if stop < len(value) else "")
-                    hits.append((title or url, name, excerpt))
-                    break
-    summary = f"在「{chat.table_name}」中找到 {len(hits)} 条包含「{term}」的论文记录。"
+            found = _matching_field(fields, searchable, names["title"], term, needle, boundary)
+            if found:
+                count += 1
+                if found[0] in names["title"] and found[1]:
+                    alias_count += 1
+                if len(hits) < 10:
+                    hits.append(((row["id"], title, url), *found))
+    summary = f"在「{chat.table_name}」中找到 {count} 条包含「{term}」的论文记录。"
+    if alias_count:
+        summary = f"在「{chat.table_name}」中找到 {count} 条匹配「{term}」的论文记录，其中 {alias_count} 条命中题名简称。"
     if not hits:
         return {"message": summary + "\n已查字段：" + "、".join(searchable) + "。"}
     lines = [summary]
-    for i, (title, field, excerpt) in enumerate(hits[:10], 1):
-        lines.append(f"{i}. {title}（命中「{field}」）" + (f"\n   {excerpt}" if field not in names["title"] else ""))
-    if len(hits) > 10:
+    for i, ((_, title, url), field, excerpt) in enumerate(hits, 1):
+        lines.append(f"{i}. {_clean(title or url)}（命中「{field}」）" + (f"\n   {excerpt}" if excerpt else ""))
+    if count > len(hits):
         lines.append("这里显示前 10 条。")
+    # 有待选论文或字段时，序号优先属于那份预览；纯确认阶段可继续只读回看。
+    if not task or task["stage"] in {"schema", "admin_commit", "evidence_confirm"}:
+        remember_results(chat, [identity for identity, _, _ in hits], task)
+        lines.append("可以说“打开第一篇”查看收藏记录。")
     return {"message": "\n".join(lines)}
 
 
@@ -126,7 +208,7 @@ def handle(chat, message, pending_id):
                 return chat._ask(task["plan"], task["message"], task["choices"], task["stage"])
             term = task["plan"]["term"]
             if use_local:
-                reply = search_table(chat, term)
+                reply = search_table(chat, term, source_selected=True)
                 chat.pending = None
                 return reply
             # 先完成题录查询，失败时仍可重试该选择。下一步使用独立的确认编号。
