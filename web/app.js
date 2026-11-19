@@ -349,7 +349,10 @@ let pendingId = null;
 let reviewId = null;
 const reviewSelections = new Map();
 const reviewFieldOverrides = new Map();
+const reviewBatchMeta = new Map();
 const reviewColSelects = [];
+let rememberReviewPrefs = false;
+let detailProgressSelect = null;
 let selectedId = null;
 let choosingComparison = false;
 const comparedRecords = new Map();
@@ -952,6 +955,7 @@ function renderLibraryRows() {
 function resetLibraryFilter() {
   byId("library-query").value = "";
   byId("reading-filter").value = "";
+  byId("reading-filter")._cselect?.sync(false);
 }
 
 function paperRef(row) {
@@ -988,9 +992,16 @@ function renderSelection() {
   const chips = byId("selection-chips");
   chips.replaceChildren();
   for (const [i, ref] of [...comparedRecords.values()].entries()) {
-    const chip = make("button", (i + 1) + ". " + (ref.title || ref.url) + " ×", "paper-detail-pill selection-chip");
+    const chip = make("button", undefined, "paper-detail-pill selection-chip");
     chip.type = "button";
+    const text = (i + 1) + ". " + (ref.title || ref.url);
+    const label = make("span", text, "selection-chip-label");
+    const ico = make("span", undefined, "selection-chip-ico");
+    ico.setAttribute("aria-hidden", "true");
+    ico.innerHTML = ICONS.close;
+    chip.append(label, ico);
     chip.title = "移出对照：" + (ref.title || ref.url);
+    chip.setAttribute("aria-label", chip.title);
     chip.onclick = () => toggleCompared(ref);
     chips.append(chip);
   }
@@ -1008,6 +1019,7 @@ function readingTools(row) {
   select.value = current;
   select.onchange = async () => {
     select.disabled = true;
+    select._cselect?.sync(false);
     try {
       await api("/api/reading-progress", { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ record_id: row.id, expected: current, status: select.value, ...historyIdentity }) });
@@ -1043,6 +1055,10 @@ function readingTools(row) {
 }
 
 function showDetail(row) {
+  if (detailProgressSelect) {
+    detailProgressSelect.destroy();
+    detailProgressSelect = null;
+  }
   const list = byId("detail-content");
   list.replaceChildren();
   const ref = paperRef(row);
@@ -1058,6 +1074,12 @@ function showDetail(row) {
   };
   if (state.reading_progress) {
     list.append(makeDetailRow("本地阅读进度", "", dd => dd.append(readingTools(row))));
+    const progSel = list.querySelector(".reading-tools select");
+    if (progSel) {
+      detailProgressSelect = createCustomSelect(progSel, {
+        variant: "pill", placement: "bottom", minWidth: 96, maxHeight: 160
+      });
+    }
   }
   list.append(
     makeDetailRow("记录 ID", row.id, dd => {
@@ -1232,6 +1254,8 @@ function renderState() {
   renderSchemaStrip();
   byId("reading-filter").hidden = !state.reading_progress;
   byId("export-format").querySelector('[value="json"]').disabled = !state.reading_progress;
+  byId("reading-filter")._cselect?.sync(false);
+  byId("export-format")._cselect?.sync(false);
   renderLibraryRows();
   requestAnimationFrame(() => selectView(viewMode, false));
 }
@@ -1528,6 +1552,18 @@ const evidenceKinds = { metric: "数据", figure: "图片", table: "表格", for
   code: "代码仓库", model: "模型资源", dataset: "数据集" };
 const resourceKinds = new Set(["code", "model", "dataset"]);
 
+function openLightbox(src, caption = "") {
+  const box = byId("img-lightbox");
+  const img = byId("lightbox-img");
+  const cap = byId("lightbox-caption");
+  if (!box || !img || !src) return;
+  img.src = src;
+  img.alt = caption || "预览图片";
+  cap.textContent = caption;
+  cap.hidden = !caption;
+  if (!box.open) box.showModal();
+}
+
 function reviewItem(item, paperUrl, checkbox, activeField, pageEndpoint) {
   const block = make("section", undefined, "review-item");
   block.dataset.kind = item.kind;
@@ -1582,9 +1618,15 @@ function reviewItem(item, paperUrl, checkbox, activeField, pageEndpoint) {
     const figure = link(undefined, imageUrl, "review-image");
     const img = make("img");
     img.alt = item.label || "论文原图";
+    img.title = "点击放大查看";
     img.loading = "lazy";
     img.referrerPolicy = "no-referrer";
     img.addEventListener("error", () => img.remove(), { once: true });
+    img.addEventListener("click", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      openLightbox(imageUrl, item.label || "论文原图");
+    });
     img.src = imageUrl;
     const caption = make("span");
     caption.append(make("span", "打开原图"));
@@ -1617,9 +1659,11 @@ function reviewItem(item, paperUrl, checkbox, activeField, pageEndpoint) {
       if (!page.open || page.querySelector("img")) return;
       const image = make("img");
       image.alt = "证据所在 PDF 第 " + item.pdf_page + " 页";
+      image.title = "点击放大查看";
       const status = make("span", "正在读取原页…");
       image.onload = () => status.remove();
       image.onerror = () => { status.textContent = "原页预览暂不可用，可打开上方原文核对。"; image.hidden = true; };
+      image.addEventListener("click", () => openLightbox(pageEndpoint, (item.label ? item.label + " · " : "") + "PDF 第 " + item.pdf_page + " 页"));
       image.src = pageEndpoint;
       page.append(status, image);
     });
@@ -1640,6 +1684,9 @@ function showReviewButton(article, preview, restored = false) {
 function openEvidenceReview(preview, restored = false) {
   const dialog = byId("evidence-review");
   while (reviewColSelects.length) reviewColSelects.pop().destroy();
+  rememberReviewPrefs = false;
+  reviewId = preview.id;
+  reviewBatchMeta.set(reviewId, preview.papers.map(paper => (paper.items || []).map(item => item.kind)));
   const container = byId("review-papers");
   container.replaceChildren();
   const tabsEl = byId("review-paper-tabs");
@@ -1647,7 +1694,6 @@ function openEvidenceReview(preview, restored = false) {
   const paperSelect = byId("review-paper-select");
   paperSelect.replaceChildren();
   const kindSelect = byId("review-kind");
-  reviewId = preview.id;
   const readyPapers = preview.papers.filter(paper => paper.status === "ready");
   const actionable = Boolean(reviewId && reviewId === pendingId && readyPapers.length);
   if (actionable && !reviewSelections.has(reviewId)) {
@@ -1816,6 +1862,18 @@ function openEvidenceReview(preview, restored = false) {
           chip.append(colSelect);
           colBar.append(chip);
           pendingColSelects.push(colSelect);
+        }
+        if (state.history_scope) {
+          const prefLabel = make("label", undefined, "review-remember-pref");
+          const prefCheck = make("input", undefined, "review-check");
+          prefCheck.type = "checkbox";
+          prefCheck.checked = rememberReviewPrefs;
+          prefCheck.addEventListener("change", () => {
+            rememberReviewPrefs = prefCheck.checked;
+            container.querySelectorAll(".review-remember-pref input").forEach(el => { el.checked = rememberReviewPrefs; });
+          });
+          prefLabel.append(prefCheck, make("span", "记住为本表默认"));
+          colBar.append(prefLabel);
         }
         section.append(colBar);
       }
@@ -2027,6 +2085,8 @@ async function submit(text) {
   const fields = rawFields && rawFields.some(map => map && Object.keys(map).length)
     ? rawFields.map(map => (map && Object.keys(map).length ? { ...map } : null))
     : undefined;
+  const shouldRememberPrefs = confirm && rememberReviewPrefs;
+  const batchKinds = reviewBatchMeta.get(task);
   const matchingRetry = retryableRequest?.message === instruction && retryableRequest.task === task &&
     JSON.stringify(retryableRequest.selection) === JSON.stringify(selection) &&
     JSON.stringify(retryableRequest.fields) === JSON.stringify(fields);
@@ -2068,6 +2128,7 @@ async function submit(text) {
       resetLibraryFilter();
       reviewSelections.clear();
       reviewFieldOverrides.clear();
+      reviewBatchMeta.clear();
       document.querySelectorAll(".review-reopen, .open-saved-row").forEach(button => { button.disabled = true; });
       showEvidence([]);
       const target = feishuTableLink(result.workspace_url);
@@ -2138,6 +2199,27 @@ async function submit(text) {
       if (result.history_scope && result.history_scope !== state.history_scope) await refreshState();
       else if (!await workspaceHistory.sync({...state, ...result})) await refreshState();
     }
+    if (shouldRememberPrefs && request.fields && batchKinds && state.history_scope &&
+        result.evidence_results?.some(item => item.status === "verified")) {
+      const prefLabels = {
+        metric: "关键数据", figure: "图片", table: "表格", formula: "公式",
+        code: "代码链接", model: "模型链接", dataset: "数据集链接"
+      };
+      const rules = [];
+      request.fields.forEach((overrides, pIdx) => {
+        if (!overrides) return;
+        for (const [idxStr, col] of Object.entries(overrides)) {
+          const kind = batchKinds[pIdx]?.[Number(idxStr)];
+          const label = prefLabels[kind];
+          if (label && col) rules.push(label + "优先写入「" + col + "」");
+        }
+      });
+      if (rules.length) {
+        const saved = await workspaceHistory.savePreferences(rules);
+        if (saved > 0) showToast("已记住本表写入列偏好");
+      }
+    }
+    if (confirm) rememberReviewPrefs = false;
     if (result.target_changed && ready && !result.verification) showToast("已切换到「" + state.table_name + "」");
     if ((result.row || result.verification) && !incomplete) playRevealWave();
   } catch (err) {
@@ -2377,6 +2459,7 @@ byId("compare-selected").addEventListener("click", async () => {
 byId("export-format").addEventListener("change", async event => {
   const format = event.target.value;
   event.target.value = "";
+  event.target._cselect?.sync(false);
   if (!format) return;
   const viewId = state.table_view_id;
   const filename = (state.table_name || "阅读清单").replace(/[<>:"/\\|?*]/g, "_");
@@ -2418,8 +2501,14 @@ byId("comparison-detail").addEventListener("click", event => {
 byId("detail").addEventListener("click", event => {
   if (event.target === byId("detail")) byId("detail").close();
 });
+byId("lightbox-close").addEventListener("click", () => byId("img-lightbox").close());
+byId("img-lightbox").addEventListener("click", event => {
+  if (event.target === byId("img-lightbox")) byId("img-lightbox").close();
+});
 
 animateDetailsToggle(byId("pdf-tray"), ".pdf-tray-body");
+createCustomSelect(byId("reading-filter"), { variant: "pill", placement: "bottom", minWidth: 108, maxHeight: 200 });
+createCustomSelect(byId("export-format"), { variant: "pill", placement: "bottom", minWidth: 146, maxHeight: 240 });
 createCustomSelect(byId("model-select"), { variant: "pill", placement: "top", minWidth: 216, maxHeight: 248 });
 createCustomSelect(byId("pdf-select"), { variant: "field", placement: "top", matchTriggerWidth: true, fullWidth: true });
 createCustomSelect(byId("pdf-target"), { variant: "field", placement: "top", matchTriggerWidth: true, fullWidth: true });

@@ -5,7 +5,7 @@ function createWorkspaceHistory() {
   const tabs = panel.querySelectorAll("[data-history-tab]");
   const welcome = byId("welcome").cloneNode(true);
   const statuses = {
-    verified: "回读一致", partial: "部分完成", failed: "失败", unverified: "待核验",
+    verified: "已核验", partial: "部分完成", failed: "失败", unverified: "待核验",
     cancelled: "已取消", preview: "仅预览", unchanged: "无改动"
   };
   const dateFormat = new Intl.DateTimeFormat("zh-CN", {
@@ -108,13 +108,16 @@ function createWorkspaceHistory() {
       heading.append(make("strong", item.summary || "操作记录"), make("small", dateLabel(item.created)));
       const status = make("span", statuses[item.status] || item.status || "已记录", "history-status");
       status.dataset.status = item.status || "";
-      summary.append(heading, status);
+      const chev = make("span", undefined, "disclosure-chevron");
+      chev.setAttribute("aria-hidden", "true");
+      chev.innerHTML = ICONS.chevronDown;
+      summary.append(heading, status, chev);
       const fields = make("dl");
       for (const field of item.details || []) {
         const label = make("dt", field.label || "详情");
         const value = make("dd", field.value || "");
         if (/^https?:\/\//i.test(field.url || "") && safeLink(field.url)) {
-          value.append(link("打开链接", safeLink(field.url), "history-source"));
+          value.append(iconLink("打开链接", safeLink(field.url), "history-source"));
         }
         if (field.record_id) {
           const scope = data.scope;
@@ -135,6 +138,28 @@ function createWorkspaceHistory() {
     if (!list.childElementCount) list.append(make("p", "本表还没有操作记录。", "history-empty"));
   }
 
+  const prefKindSelect = byId("pref-kind-select");
+  const prefColSelect = byId("pref-col-select");
+  for (const [val, label] of [
+    ["", "选择数据类型"], ["关键数据", "关键数据"], ["图片", "图片"], ["表格", "表格"],
+    ["公式", "公式"], ["代码链接", "代码链接"], ["模型链接", "模型链接"], ["数据集链接", "数据集链接"]
+  ]) prefKindSelect.add(new Option(label, val));
+  prefColSelect.add(new Option("选择写入列", ""));
+  const prefKindCs = createCustomSelect(prefKindSelect, {
+    variant: "pill", placement: "bottom", minWidth: 118, maxHeight: 210, fullWidth: true
+  });
+  const prefColCs = createCustomSelect(prefColSelect, {
+    variant: "pill", placement: "bottom", minWidth: 118, maxHeight: 210, fullWidth: true
+  });
+  function syncPrefBuilderInput() {
+    if (prefKindSelect.value && prefColSelect.value) {
+      byId("preference-input").value = prefKindSelect.value + "优先写入「" + prefColSelect.value + "」";
+      syncControls();
+    }
+  }
+  prefKindSelect.addEventListener("change", syncPrefBuilderInput);
+  prefColSelect.addEventListener("change", syncPrefBuilderInput);
+
   function renderSettings() {
     for (const input of panel.querySelectorAll("[data-setting]")) {
       input.checked = data.settings?.[input.dataset.setting] === true;
@@ -142,10 +167,16 @@ function createWorkspaceHistory() {
     const identity = new Set([...(state.identity_fields?.titles || []), ...(state.identity_fields?.links || [])]);
     const options = document.createDocumentFragment();
     const columns = state.fields.filter(f => f.type === "text" && !identity.has(f.name));
-    for (const kind of ["代码链接", "关键数据", "图题", "实验表格", "公式", "模型链接", "数据集链接"]) {
+    const prevCol = prefColSelect.value;
+    prefColSelect.replaceChildren(new Option("选择写入列", ""));
+    for (const column of columns) prefColSelect.add(new Option(column.name, column.name));
+    if (columns.some(column => column.name === prevCol)) prefColSelect.value = prevCol;
+    for (const kind of ["代码链接", "关键数据", "图片", "表格", "公式", "模型链接", "数据集链接"]) {
       for (const column of columns) options.append(new Option(kind + "优先写入「" + column.name + "」"));
     }
     byId("preference-options").replaceChildren(options);
+    prefKindCs?.sync(false);
+    prefColCs?.sync(false);
     const list = byId("history-preferences");
     list.replaceChildren();
     for (const item of data.preferences || []) {
@@ -209,6 +240,9 @@ function createWorkspaceHistory() {
       extendedOperations = false;
       restoreMessages(snapshot.messages || [], Boolean(data));
       byId("preference-input").value = "";
+      prefKindSelect.value = prefColSelect.value = "";
+      prefKindCs?.sync(false);
+      prefColCs?.sync(false);
       cancelDecision();
       renderedTail = tail;
     } else if (manual && snapshot.settings?.save_history && renderedTail !== tail) {
@@ -306,6 +340,9 @@ function createWorkspaceHistory() {
     const locked = changing || busy || switchingModel || refreshingState || uploadingPdf || !ready;
     byId("history-open").disabled = byId("context-forget").disabled = locked;
     for (const el of panel.querySelectorAll("#history-body button, #history-body input, #history-accept")) el.disabled = locked || !data;
+    prefKindSelect.disabled = prefColSelect.disabled = locked || !data;
+    prefKindCs?.sync(false);
+    prefColCs?.sync(false);
     byId("preference-save").disabled ||= !byId("preference-input").value.trim();
     byId("history-earlier-messages").hidden = !data || messageCursor == null;
     byId("history-earlier-messages").disabled = locked || loadingPage.messages;
@@ -330,7 +367,12 @@ function createWorkspaceHistory() {
       state.history_conversation_id = result.active_id;
       const changed = previous.active_id !== result.active_id || action === "clear_history";
       accept(result, action === "clear_history");
-      if (action === "add_preference") byId("preference-input").value = "";
+      if (action === "add_preference") {
+        byId("preference-input").value = "";
+        prefKindSelect.value = prefColSelect.value = "";
+        prefKindCs?.sync(false);
+        prefColCs?.sync(false);
+      }
       if (action === "open" || action === "new") panel.close();
       if (changed) {
         await refreshState();
@@ -374,5 +416,24 @@ function createWorkspaceHistory() {
     const text = byId("preference-input").value.trim();
     if (text) change("add_preference", {text});
   };
-  return { sync, syncControls, get changing() { return changing; } };
+  async function savePreferences(texts) {
+    if (!data?.scope || !data?.active_id || !Array.isArray(texts) || !texts.length) return 0;
+    let saved = 0;
+    for (const raw of [...new Set(texts)]) {
+      const text = String(raw || "").trim();
+      if (!text) continue;
+      try {
+        const result = await api("/api/workspace-history", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "add_preference", scope: data.scope, conversation_id: data.active_id, text })
+        });
+        if (result.scope === data.scope) accept(result);
+        saved++;
+      } catch {}
+    }
+    return saved;
+  }
+
+  return { sync, syncControls, savePreferences, get changing() { return changing; } };
 }

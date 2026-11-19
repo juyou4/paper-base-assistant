@@ -1,0 +1,985 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>论文入表助手 · 系统架构图</title>
+  <style>
+    :root {
+      --bg: #f6f6f7;
+      --card: #ffffff;
+      --card-sub: #fafafb;
+      --tray: #eff0f3;
+      --ink: #18181b;
+      --ink-2: #52525b;
+      --muted: #71717a;
+      --border: rgba(24, 24, 27, 0.08);
+      --border-strong: rgba(24, 24, 27, 0.14);
+      --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px -10px rgba(15, 23, 42, 0.07);
+      --shadow-hover: 0 4px 12px rgba(15, 23, 42, 0.06), 0 14px 32px -12px rgba(15, 23, 42, 0.12);
+      --accent: #0d8a55;
+      --accent-soft: rgba(13, 138, 85, 0.09);
+      --accent-border: rgba(13, 138, 85, 0.24);
+      --indigo: #3b5bdb;
+      --indigo-soft: rgba(59, 91, 219, 0.08);
+      --indigo-border: rgba(59, 91, 219, 0.24);
+      --amber: #b45309;
+      --amber-soft: rgba(180, 83, 9, 0.09);
+      --amber-border: rgba(180, 83, 9, 0.24);
+      --line: rgba(24, 24, 27, 0.2);
+      --line-active: #18181b;
+      --font-sans: "PingFang SC", "Inter", "Microsoft YaHei UI", -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-mono: "JetBrains Mono", "Cascadia Code", ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+
+    html[data-theme="dark"] {
+      --bg: #101113;
+      --card: #18191d;
+      --card-sub: #1f2126;
+      --tray: #26282e;
+      --ink: #f4f4f5;
+      --ink-2: #b4b6be;
+      --muted: #8b8e98;
+      --border: rgba(255, 255, 255, 0.08);
+      --border-strong: rgba(255, 255, 255, 0.15);
+      --shadow-card: 0 2px 6px rgba(0, 0, 0, 0.28), 0 12px 28px -12px rgba(0, 0, 0, 0.48);
+      --shadow-hover: 0 6px 18px rgba(0, 0, 0, 0.36), 0 18px 36px -12px rgba(0, 0, 0, 0.6);
+      --accent: #34d399;
+      --accent-soft: rgba(52, 211, 153, 0.12);
+      --accent-border: rgba(52, 211, 153, 0.28);
+      --indigo: #818cf8;
+      --indigo-soft: rgba(129, 140, 248, 0.13);
+      --indigo-border: rgba(129, 140, 248, 0.3);
+      --amber: #fbbf24;
+      --amber-soft: rgba(251, 191, 36, 0.12);
+      --amber-border: rgba(251, 191, 36, 0.28);
+      --line: rgba(255, 255, 255, 0.22);
+      --line-active: #f4f4f5;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(900px 420px at 14% -8%, var(--accent-soft), transparent 62%),
+        radial-gradient(840px 420px at 88% -6%, var(--indigo-soft), transparent 62%),
+        var(--bg);
+      color: var(--ink);
+      font: 14px/1.55 var(--font-sans);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .page {
+      width: min(1180px, calc(100% - 36px));
+      margin: 0 auto;
+      padding: 26px 0 36px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    /* 顶部极简导航栏 */
+    .topbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 12px 16px;
+      border-radius: 20px;
+      background: color-mix(in srgb, var(--card) 86%, transparent);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow-card);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .brand-icon {
+      width: 34px;
+      height: 34px;
+      border-radius: 11px;
+      display: grid;
+      place-items: center;
+      background: var(--ink);
+      color: var(--card);
+      flex: none;
+    }
+
+    .brand-icon svg { width: 17px; height: 17px; }
+
+    .brand h1 {
+      margin: 0;
+      font-size: 15.5px;
+      font-weight: 680;
+      letter-spacing: -0.01em;
+    }
+
+    .brand p {
+      margin: 1px 0 0;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .seg {
+      display: inline-flex;
+      padding: 3px;
+      border-radius: 999px;
+      background: var(--tray);
+      border: 1px solid var(--border);
+    }
+
+    .seg button {
+      border: 0;
+      background: transparent;
+      color: var(--ink-2);
+      font: 560 12.5px/1 var(--font-sans);
+      padding: 8px 14px;
+      border-radius: 999px;
+      cursor: pointer;
+      transition: background-color 180ms ease, color 180ms ease, box-shadow 180ms ease;
+    }
+
+    .seg button[aria-selected="true"] {
+      background: var(--card);
+      color: var(--ink);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+    }
+
+    .pill-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 34px;
+      padding: 0 12px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--ink-2);
+      font: 550 12px/1 var(--font-sans);
+      cursor: pointer;
+      transition: border-color 160ms ease, color 160ms ease, transform 150ms ease;
+    }
+
+    .pill-btn:hover {
+      border-color: var(--border-strong);
+      color: var(--ink);
+    }
+
+    .pill-btn:active { transform: scale(0.97); }
+    .pill-btn svg { width: 14px; height: 14px; }
+
+    /* 画布外框 */
+    .canvas-card {
+      position: relative;
+      border-radius: 24px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow-card);
+      padding: 20px 22px 18px;
+      overflow: hidden;
+    }
+
+    .canvas-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+
+    .legend {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+    }
+    .dot.core { background: var(--ink); }
+    .dot.safe { background: var(--accent); }
+    .dot.llm { background: var(--indigo); }
+    .dot.human { background: var(--amber); }
+
+    .canvas-hint {
+      font-size: 11.5px;
+      color: var(--muted);
+    }
+
+    .diagram-stage {
+      width: 100%;
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+
+    .diagram-stage svg {
+      display: block;
+      width: 100%;
+      min-width: 960px;
+      height: auto;
+    }
+
+    /* SVG 交互节点 */
+    .node {
+      cursor: pointer;
+      transition: opacity 220ms ease, transform 220ms ease;
+    }
+
+    .node .box {
+      transition: stroke 180ms ease, stroke-width 180ms ease, filter 180ms ease;
+    }
+
+    .node:hover .box,
+    .node.is-active .box {
+      stroke-width: 1.7;
+      filter: drop-shadow(0 8px 18px rgba(15, 23, 42, 0.1));
+    }
+
+    svg.has-focus .node:not(.is-active):not(.is-related) {
+      opacity: 0.36;
+    }
+
+    .edge {
+      transition: opacity 220ms ease, stroke 200ms ease, stroke-width 200ms ease;
+    }
+
+    svg.has-focus .edge:not(.is-related) {
+      opacity: 0.16;
+    }
+
+    .edge.is-related {
+      stroke-width: 2;
+    }
+
+    .flow-dash {
+      stroke-dasharray: 5 5;
+      animation: flowDash 18s linear infinite;
+    }
+
+    @keyframes flowDash {
+      to { stroke-dashoffset: -120; }
+    }
+
+    /* 底部详情条 */
+    .inspector {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 13px 18px;
+      border-radius: 18px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow-card);
+      min-height: 58px;
+    }
+
+    .inspector-main {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+
+    .inspector-tag {
+      padding: 3px 9px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 650;
+      background: var(--tray);
+      color: var(--ink-2);
+    }
+
+    .inspector-tag.safe { background: var(--accent-soft); color: var(--accent); }
+    .inspector-tag.llm { background: var(--indigo-soft); color: var(--indigo); }
+    .inspector-tag.human { background: var(--amber-soft); color: var(--amber); }
+
+    .inspector-title {
+      font-size: 13.5px;
+      font-weight: 650;
+      color: var(--ink);
+    }
+
+    .inspector-desc {
+      font-size: 12.5px;
+      color: var(--ink-2);
+    }
+
+    .inspector-files {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .file-chip {
+      padding: 3px 8px;
+      border-radius: 7px;
+      background: var(--card-sub);
+      border: 1px solid var(--border);
+      font: 500 11px/1.3 var(--font-mono);
+      color: var(--ink-2);
+    }
+
+    /* 底部三原则卡片 */
+    .pillars {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .pillar {
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow-card);
+    }
+
+    .pillar-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 5px;
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    .pillar p {
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.55;
+      color: var(--ink-2);
+    }
+
+    @media (max-width: 820px) {
+      .pillars { grid-template-columns: 1fr; }
+    }
+
+    @media print {
+      body { background: #fff; }
+      .controls, .canvas-hint { display: none !important; }
+      .topbar, .canvas-card, .inspector, .pillar { box-shadow: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a2.5 2.5 0 0 1 0-5H20"/>
+          </svg>
+        </span>
+        <div>
+          <h1>论文入表助手 · 系统架构</h1>
+          <p>大模型只做理解与归纳，数据解析和写表全由服务端校验执行</p>
+        </div>
+      </div>
+
+      <div class="controls">
+        <div class="seg" role="tablist" aria-label="架构视图切换">
+          <button type="button" role="tab" aria-selected="true" data-view="arch">系统分层架构</button>
+          <button type="button" role="tab" aria-selected="false" data-view="flow">批量提取与写表流程</button>
+        </div>
+        <button type="button" class="pill-btn" id="btn-export" title="下载当前视图的矢量 SVG 文件">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 4v11m0 0-4-4m4 4 4-4M5 19h14"/>
+          </svg>
+          <span>导出 SVG</span>
+        </button>
+        <button type="button" class="pill-btn" id="btn-theme" title="切换深浅色主题">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
+          </svg>
+          <span id="theme-label">深色</span>
+        </button>
+      </div>
+    </header>
+
+    <section class="canvas-card">
+      <div class="canvas-head">
+        <div class="legend">
+          <span class="legend-item"><i class="dot core"></i>核心流程</span>
+          <span class="legend-item"><i class="dot safe"></i>数据校验与写表</span>
+          <span class="legend-item"><i class="dot llm"></i>模型推理（只读）</span>
+          <span class="legend-item"><i class="dot human"></i>人工确认</span>
+        </div>
+        <span class="canvas-hint">点击任意模块查看职责说明与源码位置</span>
+      </div>
+
+      <!-- 视图一：系统分层架构 SVG -->
+      <div class="diagram-stage" id="view-arch">
+        <svg id="svg-arch" viewBox="0 0 1120 680" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="论文入表助手五层系统架构图">
+          <defs>
+            <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="var(--line)"/>
+            </marker>
+            <marker id="arr-safe" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="var(--accent)"/>
+            </marker>
+            <marker id="arr-llm" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="var(--indigo)"/>
+            </marker>
+            <marker id="arr-human" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="var(--amber)"/>
+            </marker>
+          </defs>
+
+          <!-- 背景层次分区（极简淡色底带） -->
+          <!-- L1 前端 -->
+          <rect x="16" y="14" width="1088" height="106" rx="18" fill="var(--card-sub)" stroke="var(--border)"/>
+          <text x="34" y="38" fill="var(--muted)" font-size="11" font-weight="700" letter-spacing="0.05em" font-family="var(--font-sans)">01 · 前端工作台</text>
+
+          <!-- L2 网关 -->
+          <rect x="16" y="138" width="1088" height="96" rx="18" fill="var(--card-sub)" stroke="var(--border)"/>
+          <text x="34" y="162" fill="var(--muted)" font-size="11" font-weight="700" letter-spacing="0.05em" font-family="var(--font-sans)">02 · 服务端接口与会话管理</text>
+
+          <!-- L3 编排 + 模型右侧沙箱 -->
+          <rect x="16" y="252" width="760" height="116" rx="18" fill="var(--card-sub)" stroke="var(--border)"/>
+          <text x="34" y="276" fill="var(--muted)" font-size="11" font-weight="700" letter-spacing="0.05em" font-family="var(--font-sans)">03 · 对话理解与流程控制</text>
+
+          <!-- L4 确定性执行引擎 -->
+          <rect x="16" y="386" width="760" height="136" rx="18" fill="var(--card-sub)" stroke="var(--border)"/>
+          <text x="34" y="410" fill="var(--muted)" font-size="11" font-weight="700" letter-spacing="0.05em" font-family="var(--font-sans)">04 · 核心解析与执行引擎</text>
+
+          <!-- 右侧独立沙箱：大模型只读推理 -->
+          <rect x="796" y="252" width="308" height="270" rx="18" fill="var(--indigo-soft)" stroke="var(--indigo-border)" stroke-dasharray="5 4"/>
+          <text x="816" y="276" fill="var(--indigo)" font-size="11" font-weight="700" letter-spacing="0.05em" font-family="var(--font-sans)">大模型推理区（只读隔离）</text>
+
+          <!-- L5 存储与回读层 -->
+          <rect x="16" y="540" width="1088" height="122" rx="18" fill="var(--accent-soft)" stroke="var(--accent-border)"/>
+          <text x="34" y="564" fill="var(--accent)" font-size="11" font-weight="700" letter-spacing="0.05em" font-family="var(--font-sans)">05 · 表格存储与写入后核验</text>
+
+          <!-- ==================== 连线层 ==================== -->
+          <!-- UI -> HTTP -->
+          <path class="edge" data-from="ui-chat" data-to="http-api" d="M 190 106 L 190 166" fill="none" stroke="var(--line)" stroke-width="1.5" marker-end="url(#arr)"/>
+          <path class="edge flow-dash" data-from="http-activity" data-to="ui-chat" d="M 550 172 C 470 144, 340 132, 265 106" fill="none" stroke="var(--accent)" stroke-width="1.4" marker-end="url(#arr-safe)"/>
+          <path class="edge" data-from="ui-review" data-to="http-api" d="M 558 106 C 558 134, 340 134, 310 166" fill="none" stroke="var(--amber)" stroke-width="1.5" marker-end="url(#arr-human)"/>
+          <path class="edge" data-from="ui-pdf" data-to="http-attach" d="M 922 106 L 922 166" fill="none" stroke="var(--line)" stroke-width="1.5" marker-end="url(#arr)"/>
+
+          <!-- HTTP -> Orchestrator -->
+          <path class="edge" data-from="http-api" data-to="orch-workflow" d="M 154 220 L 154 284" fill="none" stroke="var(--line)" stroke-width="1.6" marker-end="url(#arr)"/>
+          <path class="edge" data-from="http-attach" data-to="eng-parse" d="M 922 220 L 922 236 Q 922 244 914 244 L 794 244 Q 786 244 786 252 L 786 369 Q 786 377 778 377 L 98 377 Q 90 377 90 385 L 90 420" fill="none" stroke="var(--line)" stroke-width="1.3" stroke-dasharray="4 4" marker-end="url(#arr)"/>
+
+          <!-- Orchestrator 内部与到 Engine -->
+          <path class="edge" data-from="orch-workflow" data-to="orch-search" d="M 274 320 L 294 320" fill="none" stroke="var(--line)" stroke-width="1.4" marker-end="url(#arr)"/>
+          <path class="edge" data-from="orch-search" data-to="orch-guard" d="M 544 320 L 562 320" fill="none" stroke="var(--line)" stroke-width="1.4" marker-end="url(#arr)"/>
+          <path class="edge" data-from="orch-workflow" data-to="eng-parse" d="M 154 354 L 154 420" fill="none" stroke="var(--line)" stroke-width="1.5" marker-end="url(#arr)"/>
+          <path class="edge" data-from="orch-workflow" data-to="eng-evidence" d="M 232 354 C 232 392, 368 388, 368 420" fill="none" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#arr-safe)"/>
+          <path class="edge" data-from="orch-search" data-to="eng-admin" d="M 484 354 C 484 392, 660 388, 660 420" fill="none" stroke="var(--line)" stroke-width="1.4" marker-end="url(#arr)"/>
+
+          <!-- Orchestrator <-> LLM Sandbox -->
+          <path class="edge flow-dash" data-from="orch-guard" data-to="llm-box" d="M 758 320 L 812 320" fill="none" stroke="var(--indigo)" stroke-width="1.6" marker-end="url(#arr-llm)" marker-start="url(#arr-llm)"/>
+
+          <!-- Parse -> Evidence -->
+          <path class="edge" data-from="eng-parse" data-to="eng-evidence" d="M 274 464 L 296 464" fill="none" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#arr-safe)"/>
+
+          <!-- Engine -> Storage -->
+          <path class="edge" data-from="eng-evidence" data-to="store-feishu" d="M 380 506 L 380 578" fill="none" stroke="var(--accent)" stroke-width="1.7" marker-end="url(#arr-safe)"/>
+          <path class="edge" data-from="eng-admin" data-to="store-feishu" d="M 605 506 C 605 544, 515 544, 515 578" fill="none" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#arr-safe)"/>
+          <path class="edge" data-from="eng-evidence" data-to="store-sqlite" d="M 468 506 C 468 548, 760 546, 760 578" fill="none" stroke="var(--line)" stroke-width="1.4" stroke-dasharray="4 4" marker-end="url(#arr)"/>
+
+          <!-- ==================== 节点层 ==================== -->
+          <!-- L1 Nodes -->
+          <g class="node" data-id="ui-chat">
+            <rect class="box" x="34" y="48" width="320" height="58" rx="13" fill="var(--card)" stroke="var(--border-strong)" stroke-width="1.2"/>
+            <text x="50" y="71" fill="var(--ink)" font-size="13" font-weight="650" font-family="var(--font-sans)">对话、进度与历史记忆</text>
+            <text x="50" y="91" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">发指令 · 切模型 · 历史对话 · 操作审计回执</text>
+          </g>
+
+          <g class="node" data-id="ui-review">
+            <rect class="box" x="374" y="48" width="368" height="58" rx="13" fill="var(--card)" stroke="var(--amber-border)" stroke-width="1.3"/>
+            <rect x="654" y="56" width="76" height="20" rx="10" fill="var(--amber-soft)"/>
+            <text x="692" y="70" text-anchor="middle" fill="var(--amber)" font-size="10.5" font-weight="650" font-family="var(--font-sans)">人工确认</text>
+            <text x="390" y="71" fill="var(--ink)" font-size="13" font-weight="650" font-family="var(--font-sans)">批量确认弹窗</text>
+            <text x="390" y="91" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">多篇切换 · PDF原页放大 · 自选并记住写入列</text>
+          </g>
+
+          <g class="node" data-id="ui-pdf">
+            <rect class="box" x="762" y="48" width="322" height="58" rx="13" fill="var(--card)" stroke="var(--border-strong)" stroke-width="1.2"/>
+            <text x="778" y="71" fill="var(--ink)" font-size="13" font-weight="650" font-family="var(--font-sans)">论文清单、对照与导出</text>
+            <text x="778" y="91" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">即时筛选 · 阅读进度 · 多篇对照 · 学术导出</text>
+          </g>
+
+          <!-- L2 Nodes -->
+          <g class="node" data-id="http-api">
+            <rect class="box" x="34" y="170" width="400" height="50" rx="12" fill="var(--card)" stroke="var(--border-strong)" stroke-width="1.2"/>
+            <text x="50" y="191" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">接口路由与会话隔离</text>
+            <text x="50" y="209" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">app.py · 按浏览器身份隔离对话、偏好与附件</text>
+          </g>
+
+          <g class="node" data-id="http-activity">
+            <rect class="box" x="454" y="170" width="290" height="50" rx="12" fill="var(--card)" stroke="var(--accent-border)" stroke-width="1.2"/>
+            <text x="470" y="191" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">实时步骤 &amp; 私人历史库</text>
+            <text x="470" y="209" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">activity.py · workspace_history.py</text>
+          </g>
+
+          <g class="node" data-id="http-attach">
+            <rect class="box" x="764" y="170" width="320" height="50" rx="12" fill="var(--card)" stroke="var(--border-strong)" stroke-width="1.2"/>
+            <text x="780" y="191" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">本地 PDF 暂存与原页预览</text>
+            <text x="780" y="209" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">paper_attachments · pdf_page_preview.py</text>
+          </g>
+
+          <!-- L3 Nodes -->
+          <g class="node" data-id="orch-workflow">
+            <rect class="box" x="34" y="286" width="240" height="68" rx="13" fill="var(--card)" stroke="var(--border-strong)" stroke-width="1.2"/>
+            <text x="50" y="311" fill="var(--ink)" font-size="13" font-weight="650" font-family="var(--font-sans)">多轮对话与记忆控流</text>
+            <text x="50" y="330" fill="var(--muted)" font-size="11" font-family="var(--font-mono)">workflow.py · history_ctrl</text>
+            <text x="50" y="345" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">歧义反问 · 续读焦点 · 列偏好</text>
+          </g>
+
+          <g class="node" data-id="orch-search">
+            <rect class="box" x="296" y="286" width="248" height="68" rx="13" fill="var(--card)" stroke="var(--border-strong)" stroke-width="1.2"/>
+            <text x="312" y="311" fill="var(--ink)" font-size="13" font-weight="650" font-family="var(--font-sans)">收藏回看、对照与导出</text>
+            <text x="312" y="330" fill="var(--muted)" font-size="11" font-family="var(--font-mono)">saved_compare · research_exports</text>
+            <text x="312" y="345" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">搜表/查网 · 多篇对比 · Bib/RIS</text>
+          </g>
+
+          <g class="node" data-id="orch-guard">
+            <rect class="box" x="564" y="286" width="192" height="68" rx="13" fill="var(--card)" stroke="var(--indigo-border)" stroke-width="1.2"/>
+            <text x="580" y="311" fill="var(--ink)" font-size="13" font-weight="650" font-family="var(--font-sans)">意图识别与防误操作</text>
+            <text x="580" y="330" fill="var(--muted)" font-size="11" font-family="var(--font-mono)">intent_guard · semantics</text>
+            <text x="580" y="345" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">拦截否定、假设与越权</text>
+          </g>
+
+          <!-- L4 Nodes -->
+          <g class="node" data-id="eng-parse">
+            <rect class="box" x="34" y="422" width="240" height="84" rx="13" fill="var(--card)" stroke="var(--border-strong)" stroke-width="1.2"/>
+            <text x="50" y="446" fill="var(--ink)" font-size="13" font-weight="650" font-family="var(--font-sans)">论文解析与资源提取</text>
+            <text x="50" y="465" fill="var(--muted)" font-size="11" font-family="var(--font-mono)">evidence_extract · resources</text>
+            <text x="50" y="482" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">HTML/PDF 表格 · 标出可疑网格</text>
+            <text x="50" y="497" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">原图、公式与代码/模型/数据链接</text>
+          </g>
+
+          <g class="node" data-id="eng-evidence">
+            <rect class="box" x="296" y="422" width="248" height="84" rx="13" fill="var(--card)" stroke="var(--accent-border)" stroke-width="1.4"/>
+            <rect x="466" y="430" width="68" height="19" rx="9.5" fill="var(--accent-soft)"/>
+            <text x="500" y="443" text-anchor="middle" fill="var(--accent)" font-size="10.5" font-weight="650" font-family="var(--font-sans)">并发 + 核验</text>
+            <text x="312" y="446" fill="var(--ink)" font-size="13" font-weight="650" font-family="var(--font-sans)">批量并发与安全提交</text>
+            <text x="312" y="465" fill="var(--muted)" font-size="11" font-family="var(--font-mono)">evidence_workflow · proceedings</text>
+            <text x="312" y="482" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">并发解析 + 会议官方 PDF 容灾缓存</text>
+            <text x="312" y="497" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">偏好套用 · 并发复核 · 记录回执</text>
+          </g>
+
+          <g class="node" data-id="eng-admin">
+            <rect class="box" x="564" y="422" width="192" height="84" rx="13" fill="var(--card)" stroke="var(--border-strong)" stroke-width="1.2"/>
+            <text x="580" y="446" fill="var(--ink)" font-size="13" font-weight="650" font-family="var(--font-sans)">字段与权限管理</text>
+            <text x="580" y="465" fill="var(--muted)" font-size="11" font-family="var(--font-mono)">schema_admin.py</text>
+            <text x="580" y="482" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">列增删改名与类型转换</text>
+            <text x="580" y="497" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">协作者与高级角色权限</text>
+          </g>
+
+          <!-- 右侧沙箱：模型推理 -->
+          <g class="node" data-id="llm-box">
+            <rect class="box" x="814" y="290" width="272" height="214" rx="14" fill="var(--card)" stroke="var(--indigo-border)" stroke-width="1.3"/>
+            <text x="832" y="317" fill="var(--indigo)" font-size="13" font-weight="680" font-family="var(--font-sans)">大模型能力（可自由切换）</text>
+            <text x="832" y="336" fill="var(--muted)" font-size="11" font-family="var(--font-mono)">model_support.py · codex_provider.py</text>
+
+            <rect x="832" y="352" width="236" height="36" rx="9" fill="var(--card-sub)" stroke="var(--border)"/>
+            <text x="844" y="374" fill="var(--ink)" font-size="11.8" font-weight="550" font-family="var(--font-sans)">Codex CLI · 兼容 API · 纯规则模式</text>
+
+            <rect x="832" y="398" width="236" height="44" rx="9" fill="var(--card-sub)" stroke="var(--border)"/>
+            <text x="844" y="417" fill="var(--ink)" font-size="11.5" font-weight="600" font-family="var(--font-sans)">负责：理解口语 · 推荐建表 · 写中文摘要</text>
+            <text x="844" y="434" fill="var(--muted)" font-size="10.8" font-family="var(--font-sans)">只输出限定 JSON，服务端逐项校验</text>
+
+            <rect x="832" y="452" width="236" height="36" rx="9" fill="var(--indigo-soft)"/>
+            <text x="844" y="474" fill="var(--indigo)" font-size="11.3" font-weight="600" font-family="var(--font-sans)">空目录隔离运行 · 不碰密钥和写表</text>
+          </g>
+
+          <!-- L5 Storage Nodes -->
+          <g class="node" data-id="store-feishu">
+            <rect class="box" x="34" y="578" width="560" height="68" rx="13" fill="var(--card)" stroke="var(--accent-border)" stroke-width="1.4"/>
+            <rect x="502" y="588" width="76" height="20" rx="10" fill="var(--accent-soft)"/>
+            <text x="540" y="602" text-anchor="middle" fill="var(--accent)" font-size="10.5" font-weight="650" font-family="var(--font-sans)">写后回读</text>
+            <text x="52" y="603" fill="var(--ink)" font-size="13.2" font-weight="680" font-family="var(--font-sans)">飞书多维表格（官方 lark-cli / 自建应用）</text>
+            <text x="52" y="623" fill="var(--muted)" font-size="11.2" font-family="var(--font-sans)">table_store.py · 只更新改动列 · 防止重传写重 · 写完按 ID 回读核对</text>
+          </g>
+
+          <g class="node" data-id="store-sqlite">
+            <rect class="box" x="616" y="578" width="468" height="68" rx="13" fill="var(--card)" stroke="var(--border-strong)" stroke-width="1.2"/>
+            <text x="634" y="603" fill="var(--ink)" font-size="13.2" font-weight="680" font-family="var(--font-sans)">本地 SQLite 清单（离线体验 &amp; 独立示例库）</text>
+            <text x="634" y="623" fill="var(--muted)" font-size="11.2" font-family="var(--font-sans)">LocalTable + 本地阅读进度 · 430 项 Python + 5 项 JS 测试保障</text>
+          </g>
+        </svg>
+      </div>
+
+      <!-- 视图二：批量提取与回读核心流程 SVG -->
+      <div class="diagram-stage" id="view-flow" hidden>
+        <svg id="svg-flow" viewBox="0 0 1120 460" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="批量论文提取、人工确认与飞书回读流程">
+          <defs>
+            <marker id="f-arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="var(--line)"/>
+            </marker>
+            <marker id="f-safe" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="var(--accent)"/>
+            </marker>
+            <marker id="f-human" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="var(--amber)"/>
+            </marker>
+          </defs>
+
+          <!-- 三阶段底卡 -->
+          <rect x="20" y="20" width="336" height="420" rx="20" fill="var(--card-sub)" stroke="var(--border)"/>
+          <text x="42" y="50" fill="var(--ink)" font-size="13.5" font-weight="700" font-family="var(--font-sans)">阶段 1 · 多篇并发提取</text>
+          <text x="42" y="69" fill="var(--muted)" font-size="11.5" font-family="var(--font-mono)">evidence_workflow.prepare()</text>
+
+          <rect x="392" y="20" width="336" height="420" rx="20" fill="var(--amber-soft)" stroke="var(--amber-border)"/>
+          <text x="414" y="50" fill="var(--amber)" font-size="13.5" font-weight="700" font-family="var(--font-sans)">阶段 2 · 弹窗核对与确认</text>
+          <text x="414" y="69" fill="var(--muted)" font-size="11.5" font-family="var(--font-sans)">人工把关 · 可勾选、改列、溯源</text>
+
+          <rect x="764" y="20" width="336" height="420" rx="20" fill="var(--accent-soft)" stroke="var(--accent-border)"/>
+          <text x="786" y="50" fill="var(--accent)" font-size="13.5" font-weight="700" font-family="var(--font-sans)">阶段 3 · 校验写入与回读</text>
+          <text x="786" y="69" fill="var(--muted)" font-size="11.5" font-family="var(--font-mono)">evidence_workflow.commit()</text>
+
+          <!-- 跨阶段主箭头 -->
+          <path class="edge flow-dash" data-from="s1-plan" data-to="s2-tabs" d="M 336 370 C 374 370, 366 130, 412 130" fill="none" stroke="var(--amber)" stroke-width="1.8" marker-end="url(#f-human)"/>
+          <path class="edge flow-dash" data-from="s2-confirm" data-to="s3-drift" d="M 708 370 C 746 370, 738 130, 784 130" fill="none" stroke="var(--accent)" stroke-width="1.8" marker-end="url(#f-safe)"/>
+
+          <!-- 阶段 1 内部节点 -->
+          <g class="node" data-id="s1-input">
+            <rect class="box" x="42" y="92" width="292" height="68" rx="13" fill="var(--card)" stroke="var(--border-strong)" stroke-width="1.2"/>
+            <text x="58" y="117" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">1. 读表结构并去重（最多 8 篇）</text>
+            <text x="58" y="138" fill="var(--muted)" font-size="11.2" font-family="var(--font-sans)">读取当前表字段与已有记录，过滤重复链接</text>
+          </g>
+          <path class="edge" data-from="s1-input" data-to="s1-pool" d="M 188 160 L 188 184" fill="none" stroke="var(--line)" stroke-width="1.5" marker-end="url(#f-arr)"/>
+
+          <g class="node" data-id="s1-pool">
+            <rect class="box" x="42" y="188" width="292" height="110" rx="13" fill="var(--card)" stroke="var(--border-strong)" stroke-width="1.2"/>
+            <text x="58" y="212" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">2. 多线程并发解析论文</text>
+            <text x="58" y="232" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">并发抓取，同时保留各自附件与实时进度</text>
+            <rect x="58" y="244" width="80" height="22" rx="6" fill="var(--tray)"/>
+            <text x="98" y="259" text-anchor="middle" fill="var(--ink-2)" font-size="10.5" font-family="var(--font-sans)">arXiv HTML</text>
+            <rect x="146" y="244" width="82" height="22" rx="6" fill="var(--tray)"/>
+            <text x="187" y="259" text-anchor="middle" fill="var(--ink-2)" font-size="10.5" font-family="var(--font-sans)">公开 PDF</text>
+            <rect x="236" y="244" width="82" height="22" rx="6" fill="var(--tray)"/>
+            <text x="277" y="259" text-anchor="middle" fill="var(--ink-2)" font-size="10.5" font-family="var(--font-sans)">本地 PDF</text>
+            <text x="58" y="286" fill="var(--ink-2)" font-size="11" font-family="var(--font-sans)">提取指标、图表、公式与代码仓库；容灾缓存</text>
+          </g>
+          <path class="edge" data-from="s1-pool" data-to="s1-plan" d="M 188 298 L 188 324" fill="none" stroke="var(--line)" stroke-width="1.5" marker-end="url(#f-arr)"/>
+
+          <g class="node" data-id="s1-plan">
+            <rect class="box" x="42" y="328" width="292" height="84" rx="13" fill="var(--card)" stroke="var(--border-strong)" stroke-width="1.2"/>
+            <text x="58" y="352" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">3. 套用偏好并生成快照（暂不写表）</text>
+            <text x="58" y="372" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">套用本表默认写入列，标出可疑表格与候选资源</text>
+            <text x="58" y="392" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">记下原值与记录 ID，等人工确认后再动表</text>
+          </g>
+
+          <!-- 阶段 2 内部节点 -->
+          <g class="node" data-id="s2-tabs">
+            <rect class="box" x="414" y="92" width="292" height="76" rx="13" fill="var(--card)" stroke="var(--amber-border)" stroke-width="1.2"/>
+            <text x="430" y="117" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">4. 顶部多篇标签 &amp; 原页放大核对</text>
+            <text x="430" y="137" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">并排切换各篇，可展开 PDF 原页并点击放大</text>
+            <text x="430" y="154" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">可疑网格/外部代码默认不勾选，防误写入</text>
+          </g>
+          <path class="edge" data-from="s2-tabs" data-to="s2-edit" d="M 560 168 L 560 194" fill="none" stroke="var(--amber)" stroke-width="1.5" marker-end="url(#f-human)"/>
+
+          <g class="node" data-id="s2-edit">
+            <rect class="box" x="414" y="198" width="292" height="96" rx="13" fill="var(--card)" stroke="var(--amber-border)" stroke-width="1.2"/>
+            <text x="430" y="222" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">5. 勾选条目与改选/记住写入列</text>
+            <text x="430" y="242" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">支持整篇或单条勾选，按类型快速筛选</text>
+            <text x="430" y="261" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">可改选写入列并勾选「记住为本表默认」</text>
+            <text x="430" y="279" fill="var(--muted)" font-size="10.8" font-family="var(--font-sans)">自动缓存选择与列设置，刷新页面不丢失</text>
+          </g>
+          <path class="edge" data-from="s2-edit" data-to="s2-confirm" d="M 560 294 L 560 324" fill="none" stroke="var(--amber)" stroke-width="1.5" marker-end="url(#f-human)"/>
+
+          <g class="node" data-id="s2-confirm">
+            <rect class="box" x="414" y="328" width="292" height="84" rx="13" fill="var(--card)" stroke="var(--amber-border)" stroke-width="1.4"/>
+            <text x="430" y="352" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">6. 点击「确认写入」提交</text>
+            <text x="430" y="372" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">把勾选项与改选列配置一并提交服务端</text>
+            <text x="430" y="392" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">重复点击直接返回原结果，不重复写表</text>
+          </g>
+
+          <!-- 阶段 3 内部节点 -->
+          <g class="node" data-id="s3-drift">
+            <rect class="box" x="786" y="92" width="292" height="84" rx="13" fill="var(--card)" stroke="var(--accent-border)" stroke-width="1.3"/>
+            <text x="802" y="117" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">7. 写入前复核（防并发冲突）</text>
+            <text x="802" y="137" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">检查目标列合法性，重读表格核对原值</text>
+            <text x="802" y="156" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">若期间被他人修改则暂停写入，保护原数据</text>
+          </g>
+          <path class="edge" data-from="s3-drift" data-to="s3-write" d="M 932 176 L 932 204" fill="none" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#f-safe)"/>
+
+          <g class="node" data-id="s3-write">
+            <rect class="box" x="786" y="208" width="292" height="84" rx="13" fill="var(--card)" stroke="var(--accent-border)" stroke-width="1.3"/>
+            <text x="802" y="232" fill="var(--ink)" font-size="12.8" font-weight="650" font-family="var(--font-sans)">8. 增量写入飞书多维表格</text>
+            <text x="802" y="252" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">只提交勾选变更的字段，不碰其他列</text>
+            <text x="802" y="271" fill="var(--muted)" font-size="11" font-family="var(--font-sans)">新增带防重标记，网络重试不产生重复行</text>
+          </g>
+          <path class="edge" data-from="s3-write" data-to="s3-readback" d="M 932 292 L 932 324" fill="none" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#f-safe)"/>
+
+          <g class="node" data-id="s3-readback">
+            <rect class="box" x="786" y="328" width="292" height="84" rx="13" fill="var(--card)" stroke="var(--accent)" stroke-width="1.5"/>
+            <text x="802" y="352" fill="var(--accent)" font-size="12.8" font-weight="700" font-family="var(--font-sans)">9. 回读核对并留存操作回执</text>
+            <text x="802" y="372" fill="var(--ink-2)" font-size="11.2" font-family="var(--font-sans)">写完按 ID 回读比对，并保存写入列偏好</text>
+            <text x="802" y="392" fill="var(--ink)" font-size="11.2" font-weight="600" font-family="var(--font-sans)">一致标记「已核验」，写入私人审计回执</text>
+          </g>
+        </svg>
+      </div>
+    </section>
+
+    <!-- 选中模块详情条 -->
+    <aside class="inspector" id="inspector" aria-live="polite">
+      <div class="inspector-main">
+        <span class="inspector-tag safe" id="ins-tag">核心思路</span>
+        <span class="inspector-title" id="ins-title">模型负责理解，程序负责核对与写表</span>
+        <span class="inspector-desc" id="ins-desc">点击上方任意模块，可高亮上下游流向并查看对应的源码文件。</span>
+      </div>
+      <div class="inspector-files" id="ins-files">
+        <span class="file-chip">app.py</span>
+        <span class="file-chip">workflow.py</span>
+        <span class="file-chip">evidence_workflow.py</span>
+        <span class="file-chip">table_store.py</span>
+      </div>
+    </aside>
+
+    <!-- 底部三大核心设计亮点 -->
+    <section class="pillars" aria-label="核心架构特性">
+      <article class="pillar">
+        <div class="pillar-head"><i class="dot safe"></i><span>防幻觉、防乱填的三道把关</span></div>
+        <p>论文表格与数据直接从原文解析，不靠模型猜数；写入前核对目标行和原值；写完后按记录 ID 回读逐字段比对。</p>
+      </article>
+      <article class="pillar">
+        <div class="pillar-head"><i class="dot llm"></i><span>大模型只读隔离，不碰权限</span></div>
+        <p>模型在临时空目录运行，只负责理解口语和生成中文摘要；不接触飞书密钥，也不直接修改表格或权限。</p>
+      </article>
+      <article class="pillar">
+        <div class="pillar-head"><i class="dot human"></i><span>批量高效 + 人工可控确认</span></div>
+        <p>多篇论文并发解析，弹窗一屏切换核对、逐项勾选并改选写入列，刷新页面不丢选择，防重复提交。</p>
+      </article>
+    </section>
+  </div>
+
+  <script>
+    "use strict";
+
+    const META = {
+      "ui-chat": {
+        tag: "前端", cls: "", title: "对话、进度与历史记忆弹窗",
+        desc: "支持自然语言对话、切模型、实时展示工具步骤，并在「历史与记忆」里切换对话、查看操作回执与管理本表偏好。",
+        files: ["web/app.js", "web/history.js", "web/style.css"]
+      },
+      "ui-review": {
+        tag: "人工确认", cls: "human", title: "批量确认弹窗（支持原页放大与记忆偏好）",
+        desc: "顶部标签并排切换多篇论文，可展开 PDF 原页并点击全屏放大；支持改选写入列并勾选记住为本表默认。",
+        files: ["web/index.html", "web/app.js", "web/rich-text.js"]
+      },
+      "ui-pdf": {
+        tag: "前端", cls: "", title: "论文清单、对照与学术导出",
+        desc: "卡片/表格双视图配合关键词即时筛选、本地阅读进度切换、多篇并排对照，以及 BibTeX/RIS/Markdown/CSV/JSON 导出。",
+        files: ["web/index.html", "web/app.js"]
+      },
+      "http-api": {
+        tag: "接口层", cls: "", title: "接口路由与会话隔离",
+        desc: "基于 Python 标准库提供接口，按浏览器 Cookie 隔离不同用户的对话历史、表级偏好、阅读进度与本地附件。",
+        files: ["app.py"]
+      },
+      "http-activity": {
+        tag: "可观测 & 记忆", cls: "safe", title: "实时步骤记录 & 私人历史库",
+        desc: "实时记录每一步工具执行耗时；workspace_history.py 在本地独立库按表和浏览器持久化对话、续读焦点、偏好与审计回执。",
+        files: ["activity.py", "workspace_history.py"]
+      },
+      "http-attach": {
+        tag: "附件 & 原页", cls: "", title: "本地 PDF 暂存与原页图渲染",
+        desc: "按文件哈希去重暂存本地 PDF，并为待核对批次按页生成 PNG 原页视图，方便弹窗内直接对照。",
+        files: ["paper_attachments.py", "pdf_page_preview.py"]
+      },
+      "orch-workflow": {
+        tag: "流程与记忆", cls: "", title: "多轮对话、续读焦点与偏好控制",
+        desc: "遇到多笔记列主动反问，支持关闭重开后按记录 ID 安全续读上次论文，并把已保存的默认写入列带入新预览。",
+        files: ["workflow.py", "history_controller.py", "paper_selection.py"]
+      },
+      "orch-guard": {
+        tag: "防误操作", cls: "", title: "意图识别、护栏与记忆边界",
+        desc: "拦截否定句、假设句与跨表越权请求，历史记录仅还原文字且没有写权限，偏好写入前严格校验可写文本列。",
+        files: ["intent_guard.py", "agent_router.py", "history_semantics.py"]
+      },
+      "orch-search": {
+        tag: "科研工作流", cls: "", title: "收藏回看、多篇对照与学术导出",
+        desc: "支持“再看看 RAG”回看单篇、2~4 篇并排字段对照、导出 BibTeX/RIS/Markdown/CSV，以及对话建表切表。",
+        files: ["saved_paper_dialog.py", "saved_focus.py", "saved_compare.py", "research_exports.py", "title_aliases.py"]
+      },
+      "eng-parse": {
+        tag: "数据解析", cls: "", title: "论文解析、资源抽取与可疑表标记",
+        desc: "解析 HTML/PDF 表格、公式与原图，抽取出自正文的代码/模型/数据集地址；缺表题或残缺的坐标轴网格会标红默认跳过。",
+        files: ["evidence_extract.py", "paper_resources.py", "math_evidence.py", "pdf_text_tables.py"]
+      },
+      "eng-evidence": {
+        tag: "核心保障", cls: "safe", title: "批量并发、容灾缓存与安全提交",
+        desc: "多篇并发解析并缓存会议官方 PDF 指纹做离线容灾；提交前核对原值与写入列白名单，写入后生成逐字段操作回执。",
+        files: ["evidence_workflow.py", "proceedings_cache.py", "preflight.py", "source_library.py"]
+      },
+      "eng-admin": {
+        tag: "表管理", cls: "", title: "字段与权限管理",
+        desc: "支持列增删改、类型切换以及协作者/高级角色权限调整，全部走预览确认再提交。",
+        files: ["schema_admin.py", "collaborator_admin.py", "role_admin.py", "base_files.py"]
+      },
+      "llm-box": {
+        tag: "模型推理", cls: "llm", title: "大模型能力（只读隔离）",
+        desc: "支持 Codex CLI、兼容 API 与纯规则模式；模型只输出限定 JSON，不碰密钥和写表权限。",
+        files: ["model_support.py", "codex_provider.py", "intent_model.py"]
+      },
+      "store-feishu": {
+        tag: "写后核验", cls: "safe", title: "飞书多维表格适配",
+        desc: "支持官方 lark-cli 与自建应用，增量更新防重传写重，写入后按记录 ID 回读逐项验真。",
+        files: ["table_store.py"]
+      },
+      "store-sqlite": {
+        tag: "离线后端", cls: "", title: "本地 SQLite 清单、示例与测试",
+        desc: "支持独立示范研读库与本机阅读进度，离线体验完整闭环；配套 430 项 Python + 5 项 JS 自动化测试。",
+        files: ["table_store.py", "demo_library.py", "tests/"]
+      },
+      "s1-input": { tag: "阶段 1", cls: "", title: "读表结构并去重", desc: "单批最多 8 篇，先读取当前表字段与已有记录，并去掉重复链接。", files: ["evidence_workflow.py"] },
+      "s1-pool": { tag: "阶段 1", cls: "", title: "多线程并发解析与容灾", desc: "多篇论文并行抓取解析，官网不可达时自动核对本地已存会议 PDF 指纹；同步提取代码与模型链接。", files: ["evidence_workflow.py", "evidence_extract.py", "proceedings_cache.py", "paper_resources.py"] },
+      "s1-plan": { tag: "阶段 1", cls: "", title: "套用偏好并生成快照", desc: "按本表已保存偏好预选写入列，并标记坐标轴残缺表格与外部资源链接为需手动核对，此时零写表。", files: ["evidence_workflow.py", "history_semantics.py"] },
+      "s2-tabs": { tag: "阶段 2", cls: "human", title: "多篇切换与原页放大核对", desc: "弹窗一屏切换多篇论文，支持就地展开 PDF 对应原页图并点击全屏放大核对细节。", files: ["web/app.js", "pdf_page_preview.py"] },
+      "s2-edit": { tag: "阶段 2", cls: "human", title: "勾选条目与改选/记住写入列", desc: "可疑表格与外部资源默认不勾选，可手工勾选、改选写入列并勾选「记住为本表默认」。", files: ["web/app.js", "web/history.js"] },
+      "s2-confirm": { tag: "阶段 2", cls: "human", title: "确认写入提交", desc: "携带批次编号、勾选项与写入列配置提交；重复点击直接返回原结果，不重复写表。", files: ["web/app.js", "app.py", "workflow.py"] },
+      "s3-drift": { tag: "阶段 3", cls: "safe", title: "写入前复核（防并发冲突）", desc: "校验目标列合法性并重读原值，若期间被他人修改则暂停单篇写入，保护原数据。", files: ["evidence_workflow.py"] },
+      "s3-write": { tag: "阶段 3", cls: "safe", title: "增量写入飞书表格", desc: "只提交本次勾选变更的列，新增记录带防重标记，网络重试不会多写一行。", files: ["table_store.py", "evidence_workflow.py"] },
+      "s3-readback": { tag: "阶段 3", cls: "safe", title: "回读核对并保存回执与偏好", desc: "按记录 ID 回读逐字段验真并标为「已核验」，将本次确认详情记入私人操作历史，若开启记忆同步保存默认列。", files: ["evidence_workflow.py", "workspace_history.py", "history_controller.py"] }
+    };
+
+    let activeView = "arch";
+    let selectedId = null;
+
+    const views = { arch: document.getElementById("view-arch"), flow: document.getElementById("view-flow") };
+    const svgs = { arch: document.getElementById("svg-arch"), flow: document.getElementById("svg-flow") };
+
+    function renderInspector(id) {
+      const info = META[id];
+      if (!info) return;
+      const tag = document.getElementById("ins-tag");
+      tag.textContent = info.tag;
+      tag.className = "inspector-tag" + (info.cls ? " " + info.cls : "");
+      document.getElementById("ins-title").textContent = info.title;
+      document.getElementById("ins-desc").textContent = info.desc;
+      const filesEl = document.getElementById("ins-files");
+      filesEl.replaceChildren(...info.files.map(f => {
+        const span = document.createElement("span");
+        span.className = "file-chip";
+        span.textContent = f;
+        return span;
+      }));
+    }
+
+    function clearSelection(svg) {
+      svg.classList.remove("has-focus");
+      svg.querySelectorAll(".is-active, .is-related").forEach(el => {
+        el.classList.remove("is-active", "is-related");
+      });
+    }
+
+    function selectNode(svg, id) {
+      if (selectedId === id) {
+        selectedId = null;
+        clearSelection(svg);
+        return;
+      }
+      selectedId = id;
+      clearSelection(svg);
+      svg.classList.add("has-focus");
+      const target = svg.querySelector(`.node[data-id="${id}"]`);
+      if (target) target.classList.add("is-active");
+      svg.querySelectorAll(".edge").forEach(edge => {
+        if (edge.dataset.from === id || edge.dataset.to === id) {
+          edge.classList.add("is-related");
+          const peer = edge.dataset.from === id ? edge.dataset.to : edge.dataset.from;
+          const peerNode = svg.querySelector(`.node[data-id="${peer}"]`);
+          if (peerNode) peerNode.classList.add("is-related");
+        }
+      });
+      renderInspector(id);
+    }
+
+    Object.values(svgs).forEach(svg => {
+      svg.querySelectorAll(".node").forEach(node => {
+        node.addEventListener("click", e => {
+          e.stopPropagation();
+          selectNode(svg, node.dataset.id);
+        });
+      });
+      svg.addEventListener("click", () => {
+        selectedId = null;
+        clearSelection(svg);
+      });
+    });
+
+    document.querySelectorAll(".seg button").forEach(btn => {
+      btn.addEventListener("click", () => {
+        activeView = btn.dataset.view;
+        document.querySelectorAll(".seg button").forEach(b => b.setAttribute("aria-selected", String(b === btn)));
+        views.arch.hidden = activeView !== "arch";
+        views.flow.hidden = activeView !== "flow";
+        selectedId = null;
+        clearSelection(svgs.arch);
+        clearSelection(svgs.flow);
+      });
+    });
+
+    const root = document.documentElement;
+    document.getElementById("btn-theme").addEventListener("click", () => {
+      const next = root.dataset.theme === "dark" ? "light" : "dark";
+      root.dataset.theme = next;
+      document.getElementById("theme-label").textContent = next === "dark" ? "浅色" : "深色";
+    });
+
+    document.getElementById("btn-export").addEventListener("click", () => {
+      const orig = svgs[activeView];
+      const clone = orig.cloneNode(true);
+      clone.classList.remove("has-focus");
+      clone.querySelectorAll(".is-active, .is-related").forEach(el => el.classList.remove("is-active", "is-related"));
+      const cs = getComputedStyle(root);
+      const vars = [
+        "--bg", "--card", "--card-sub", "--tray", "--ink", "--ink-2", "--muted",
+        "--border", "--border-strong", "--accent", "--accent-soft", "--accent-border",
+        "--indigo", "--indigo-soft", "--indigo-border", "--amber", "--amber-soft", "--amber-border",
+        "--line", "--line-active", "--font-sans", "--font-mono"
+      ];
+      let xml = new XMLSerializer().serializeToString(clone);
+      for (const v of vars) {
+        const val = cs.getPropertyValue(v).trim().replaceAll('"', "'");
+        if (val) xml = xml.replaceAll(`var(${v})`, val);
+      }
+      const bg = cs.getPropertyValue("--card").trim() || "#ffffff";
+      xml = xml.replace("<svg ", `<svg style="background:${bg};border-radius:16px;" `);
+      const blob = new Blob([xml], { type: "image/svg+xml;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = activeView === "arch" ? "paper-base-architecture.svg" : "paper-base-batch-flow.svg";
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+  </script>
+</body>
+</html>
