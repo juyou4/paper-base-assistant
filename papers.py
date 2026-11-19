@@ -312,7 +312,7 @@ def _acl_paper(url, data_dir, need_content):
         head.feed(html)
         paper["title"] = head.meta.get("citation_title", "")
         paper.update(authors=head.authors, year=head.meta.get("citation_publication_date", "")[:4],
-                     source_version="ACL Anthology 公开会议版")
+                     source_version="ACL Anthology 公开版", **paper_sources.citation_venue(head.meta))
         doi = paper_sources._doi(head.meta.get("citation_doi", ""))
         if doi:
             paper["doi"] = doi

@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 import model_support
 import paper_attachments
+import pdf_page_preview
 import papers
 from table_store import FeishuTable, LarkCliTable, LocalTable, TableError
 from workflow import Conversation, _fields
@@ -84,6 +85,7 @@ class Application:
             link = target_link(table, chat.base_url) if chat else self.feishu_url
             fields, rows = (table.schema(), table.rows()) if bound else ([], [])
             titles = [col["name"] for col in _fields(fields, "title")]
+            links = [col["name"] for col in _fields(fields, "url")]
             aliases = {row["id"]: terms for row in rows if (terms := title_alias_terms(
                 next((row["fields"][name] for name in titles if row["fields"].get(name)), "")))}
             reading = table.reading_progress() if bound and isinstance(table, LocalTable) else None
@@ -100,6 +102,7 @@ class Application:
         return {"mode": "local" if self.mode == "local" else "feishu", "table_name": name,
                 "target_bound": bound, "base_name": base_name, "workspace_pending": workspace_pending, "pending_dialog": dialog,
                 "fields": fields, "rows": rows, "reading_progress": reading, "title_aliases": aliases,
+                "identity_fields": {"titles": titles, "links": links},
                 "sample": {"title": papers.SAMPLE["title"], "url": "https://arxiv.org/abs/" + papers.SAMPLE_ID},
                 "download_url": "/api/sample.pdf", "feishu_url": link,
                 "capabilities": {"model": agent["enabled"], "agent": agent, "activity": True}}
@@ -172,12 +175,28 @@ class Handler(BaseHTTPRequestHandler):
             app = self.server.app
             if method == "GET" and route.path == "/api/state":
                 cookie, chat = self.browser_session()
-                snapshot = app.state(chat)
+                with chat.lock:
+                    snapshot = app.state(chat)
+                    snapshot["table_view_id"] = chat.table_view_id
                 snapshot["attachments"] = paper_attachments.AttachmentLibrary(app.data_dir, cookie).list()
                 self.send_json(snapshot, cookie=cookie)
             elif route.path == "/api/attachments" or ATTACHMENT_ROUTE.fullmatch(route.path):
                 cookie, chat = self.browser_session()
                 self.attachment_request(method, route, cookie, chat)
+            elif method == "GET" and not route.query and (page_route := pdf_page_preview.ROUTE.fullmatch(route.path)):
+                cookie, chat = self.browser_session()
+                library = paper_attachments.AttachmentLibrary(app.data_dir, cookie)
+                source = pdf_page_preview.evidence_file(chat, library, page_route[1],
+                                                        int(page_route[2]), int(page_route[3]))
+                if source is None:
+                    self.send_json({"error": "当前待确认预览中没有这项 PDF 原页。"}, 404, cookie)
+                    return
+                try:
+                    png = pdf_page_preview.render(*source)
+                except ValueError as exc:
+                    self.send_json({"error": str(exc)}, 422, cookie)
+                    return
+                self.send_body(png, "image/png")
             elif method == "GET" and route.path == "/api/activity":
                 ids = parse_qs(route.query).get("request_id", [])
                 if len(ids) != 1:
@@ -185,7 +204,8 @@ class Handler(BaseHTTPRequestHandler):
                 request_id = str(uuid.UUID(ids[0]))
                 cookie, chat = self.browser_session()
                 self.send_json(chat.activity.snapshot(request_id), cookie=cookie)
-            elif method == "POST" and route.path in {"/api/chat", "/api/model", "/api/reading-progress"}:
+            elif method == "POST" and route.path in {"/api/chat", "/api/model", "/api/reading-progress",
+                                                     "/api/records/compare", "/api/records/export"}:
                 if self.headers.get_content_type() != "application/json":
                     self.send_json({"error": "请求体需要为 JSON。"}, 415)
                     return
@@ -195,6 +215,28 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 body = json.loads(self.rfile.read(length))
                 cookie, chat = self.browser_session()
+                if route.path.startswith("/api/records/"):
+                    from saved_compare import comparison_data, read_selection
+                    with chat.lock:
+                        if not isinstance(body, dict) or body.get("table_view_id") != chat.table_view_id:
+                            raise ValueError("当前数据表已经切换，请刷新后重选。")
+                        schema = chat.table.schema()
+                        if route.path.endswith("/compare"):
+                            if set(body) != {"table_view_id", "records"}:
+                                raise ValueError("请选择要比较的论文。")
+                            selection = read_selection(chat, schema, body["records"])
+                            result = comparison_data(chat.table_name, schema, selection,
+                                                     ["摘要", "方法", "关键数据", "图表", "公式", "资源链接", "笔记"])
+                        else:
+                            from research_exports import export_records
+                            if (not isinstance(body.get("format"), str) or set(body) not in (
+                                    {"table_view_id", "format"}, {"table_view_id", "format", "records"})):
+                                raise ValueError("请选择导出格式和范围。")
+                            rows = ([item[0] for item in read_selection(chat, schema, body["records"], minimum=1)]
+                                    if "records" in body else chat.table.rows())
+                            result = export_records(chat.table, schema, rows, body["format"], chat.table_name)
+                    self.send_json(result, cookie=cookie)
+                    return
                 if route.path == "/api/reading-progress":
                     if (not isinstance(body, dict) or set(body) != {"record_id", "expected", "status"}
                             or not all(isinstance(v, str) for v in body.values())):

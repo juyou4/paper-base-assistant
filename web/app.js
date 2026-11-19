@@ -351,6 +351,8 @@ const reviewSelections = new Map();
 const reviewFieldOverrides = new Map();
 const reviewColSelects = [];
 let selectedId = null;
+let choosingComparison = false;
+const comparedRecords = new Map();
 let hasVisibleRows = false;
 let viewMode = "cards";
 let latestStateRequest = 0;
@@ -937,6 +939,7 @@ function renderLibraryRows() {
   const filtered = Boolean(query || (state.reading_progress && byId("reading-filter").value));
   byId("filter-count").textContent = filtered ? visible.length + " / " + populated.length + " 条" : "";
   byId("reset-library-filter").hidden = !filtered;
+  renderSelection();
   renderCardsView(visible);
   renderTableView(visible);
   byId("empty-sheet-text").textContent = state.target_bound === false ? "请先新建多维表格"
@@ -948,6 +951,48 @@ function renderLibraryRows() {
 function resetLibraryFilter() {
   byId("library-query").value = "";
   byId("reading-filter").value = "";
+}
+
+function paperRef(row) {
+  const names = state.identity_fields || {};
+  const value = keys => (keys || []).map(key => cellValue(row.fields[key])).find(Boolean) || "";
+  return { id: row.id, title: value(names.titles), url: value(names.links) };
+}
+
+function toggleCompared(ref) {
+  if (comparedRecords.has(ref.id)) comparedRecords.delete(ref.id);
+  else if (comparedRecords.size === 4) return showToast("一次最多对照四篇论文");
+  else comparedRecords.set(ref.id, ref);
+  renderLibraryRows();
+}
+
+function comparisonPick(row) {
+  const ref = paperRef(row);
+  const index = [...comparedRecords.keys()].indexOf(ref.id);
+  const button = make("button", index < 0 ? "选择" : "已选 " + (index + 1), "paper-detail-pill compare-pick");
+  button.type = "button";
+  button.setAttribute("aria-pressed", String(index >= 0));
+  button.setAttribute("aria-label", (index < 0 ? "选择对照：" : "移出对照：") + (ref.title || ref.url));
+  button.disabled = (!ref.title && !ref.url) || (index < 0 && comparedRecords.size === 4);
+  button.onclick = () => toggleCompared(ref);
+  return button;
+}
+
+function renderSelection() {
+  byId("compare-mode").setAttribute("aria-pressed", String(choosingComparison));
+  byId("compare-mode").textContent = choosingComparison ? "结束选择" : "选择对照";
+  byId("selection-bar").hidden = !choosingComparison;
+  byId("selection-count").textContent = comparedRecords.size ? "已选 " + comparedRecords.size + " / 4 篇" : "请选择 2 至 4 篇";
+  byId("compare-selected").disabled = comparedRecords.size < 2;
+  const chips = byId("selection-chips");
+  chips.replaceChildren();
+  for (const [i, ref] of [...comparedRecords.values()].entries()) {
+    const chip = make("button", (i + 1) + ". " + (ref.title || ref.url) + " ×", "paper-detail-pill selection-chip");
+    chip.type = "button";
+    chip.title = "移出对照：" + (ref.title || ref.url);
+    chip.onclick = () => toggleCompared(ref);
+    chips.append(chip);
+  }
 }
 
 function readingTools(row) {
@@ -996,6 +1041,17 @@ function readingTools(row) {
 function showDetail(row) {
   const list = byId("detail-content");
   list.replaceChildren();
+  const ref = paperRef(row);
+  const viewId = state.table_view_id;
+  const cite = byId("copy-citation");
+  cite.disabled = !(ref.title || ref.url);
+  cite.onclick = async () => {
+    try {
+      const result = await recordsRequest("export", { format: "bib", records: [ref] }, viewId);
+      await copyWithFeedback(cite, result.content, "复制 BibTeX");
+      if (result.notice) showToast(result.notice);
+    } catch (err) { showToast(err.message, "error"); }
+  };
   if (state.reading_progress) {
     list.append(makeDetailRow("本地阅读进度", "", dd => dd.append(readingTools(row))));
   }
@@ -1035,8 +1091,7 @@ function detectPrimaryFields(fields) {
     fields.find(f => f.type === "text") ||
     null;
   const urlField =
-    fields.find(f => f.type === "url") ||
-    fields.find(f => /链接|地址|url|link/i.test(f.name)) ||
+    (state.identity_fields?.links || []).map(name => fields.find(f => f.name === name)).find(Boolean) ||
     null;
   return { titleField, urlField };
 }
@@ -1064,6 +1119,7 @@ function renderCardsView(populatedRows) {
     if (state.reading_progress) heading.append(make("small", state.reading_progress[row.id] || "待读", "reading-label"));
 
     const actions = make("div", undefined, "paper-card-actions");
+    if (choosingComparison) actions.append(comparisonPick(row));
     const rawUrl = urlField ? cellValue(row.fields[urlField.name]) : "";
     const validUrl = /^https?:\/\//i.test(rawUrl) ? safeLink(rawUrl) : null;
     if (validUrl) {
@@ -1120,7 +1176,7 @@ function renderTableView(populatedRows) {
   const table = byId("sheet");
   table.replaceChildren();
   const headers = table.createTHead().insertRow();
-  ["#", ...(state.reading_progress ? ["阅读进度"] : []), ...state.fields.map(field => field.name)].forEach(name => {
+  ["#", ...(choosingComparison ? ["对照"] : []), ...(state.reading_progress ? ["阅读进度"] : []), ...state.fields.map(field => field.name)].forEach(name => {
     const th = make("th", name);
     th.scope = "col";
     headers.append(th);
@@ -1135,6 +1191,7 @@ function renderTableView(populatedRows) {
     btn.setAttribute("aria-label", "查看第 " + (index + 1) + " 条记录");
     btn.addEventListener("click", () => showDetail(row));
     tr.insertCell().append(btn);
+    if (choosingComparison) tr.insertCell().append(comparisonPick(row));
     if (state.reading_progress) tr.insertCell().textContent = state.reading_progress[row.id] || "待读";
     for (const field of state.fields) {
       const content = make("div", undefined, "sheet-cell-content");
@@ -1170,7 +1227,7 @@ function renderState() {
 
   renderSchemaStrip();
   byId("reading-filter").hidden = !state.reading_progress;
-  byId("export-local").hidden = !state.reading_progress;
+  byId("export-format").querySelector('[value="json"]').disabled = !state.reading_progress;
   renderLibraryRows();
   requestAnimationFrame(() => selectView(viewMode, false));
 }
@@ -1184,6 +1241,10 @@ async function refreshState(manual = false) {
   try {
     const snapshot = await api("/api/state");
     if (token !== latestStateRequest) return;
+    if (state.table_view_id !== snapshot.table_view_id) {
+      choosingComparison = false;
+      comparedRecords.clear();
+    }
     state = {
       ...snapshot,
       sample: snapshot.sample || {},
@@ -1192,6 +1253,14 @@ async function refreshState(manual = false) {
       capabilities: snapshot.capabilities || {}
     };
     ready = true;
+    if (comparedRecords.size) {
+      const current = new Map(state.rows.map(row => [row.id, row]));
+      for (const ref of comparedRecords.values()) {
+        const row = current.get(ref.id);
+        const live = row && paperRef(row);
+        if (!live || live.title !== ref.title || live.url !== ref.url) comparedRecords.delete(ref.id);
+      }
+    }
     renderPdfTray();
     renderState();
     const plan = state.pending_dialog || state.workspace_pending;
@@ -1415,9 +1484,11 @@ function paperSourceLink(address) {
   }
 }
 
-const evidenceKinds = { metric: "数据", figure: "图片", table: "表格", formula: "公式" };
+const evidenceKinds = { metric: "数据", figure: "图片", table: "表格", formula: "公式",
+  code: "代码仓库", model: "模型资源", dataset: "数据集" };
+const resourceKinds = new Set(["code", "model", "dataset"]);
 
-function reviewItem(item, paperUrl, checkbox, activeField) {
+function reviewItem(item, paperUrl, checkbox, activeField, pageEndpoint) {
   const block = make("section", undefined, "review-item");
   block.dataset.kind = item.kind;
   const kind = evidenceKinds[item.kind] || "摘录";
@@ -1487,6 +1558,27 @@ function reviewItem(item, paperUrl, checkbox, activeField) {
   const label = item.source && !/^https?:/i.test(item.source) ? item.source : "论文原文";
   if (sourceUrl) block.append(iconLink(label, sourceUrl, "review-source"));
   else if (item.source) block.append(make("small", label));
+  if (resourceKinds.has(item.kind)) {
+    const resource = safeLink(item.resource_url);
+    if (resource && ["github.com", "gitlab.com", "huggingface.co"].includes(new URL(resource).hostname)) {
+      block.append(iconLink("打开" + kind, resource, "review-source"));
+    }
+  }
+  if (pageEndpoint && Number.isInteger(item.pdf_page)) {
+    const page = make("details", undefined, "review-quote pdf-page");
+    page.append(makeSummaryWithChevron("核对 PDF 第 " + item.pdf_page + " 页"));
+    page.addEventListener("toggle", () => {
+      if (!page.open || page.querySelector("img")) return;
+      const image = make("img");
+      image.alt = "证据所在 PDF 第 " + item.pdf_page + " 页";
+      const status = make("span", "正在读取原页…");
+      image.onload = () => status.remove();
+      image.onerror = () => { status.textContent = "原页预览暂不可用，可打开上方原文核对。"; image.hidden = true; };
+      image.src = pageEndpoint;
+      page.append(status, image);
+    });
+    block.append(page);
+  }
   return block;
 }
 
@@ -1518,7 +1610,7 @@ function openEvidenceReview(preview, restored = false) {
       try { saved = JSON.parse(sessionStorage.getItem("paper-review-choices")); } catch {}
     }
     const choices = preview.papers.map(paper =>
-      paper.status === "ready" ? paper.items.map(() => !restored) : []);
+      paper.status === "ready" ? paper.items.map(item => !restored && !resourceKinds.has(item.kind)) : []);
     const matches = saved?.id === reviewId && Array.isArray(saved.choices) &&
       saved.choices.length === choices.length && choices.every((items, i) =>
         Array.isArray(saved.choices[i]) && saved.choices[i].length === items.length &&
@@ -1646,7 +1738,7 @@ function openEvidenceReview(preview, restored = false) {
 
     const pendingColSelects = [];
     if (actionable && paper.status === "ready" && Array.isArray(paper.target_columns) && paper.target_columns.length > 1 && items.length) {
-      const kindOrder = ["metric", "table", "figure", "formula"];
+      const kindOrder = Object.keys(evidenceKinds);
       const byKind = kindOrder
         .map(kind => ({ kind, indices: items.flatMap((it, i) => it.kind === kind ? [i] : []) }))
         .filter(g => g.indices.length > 0);
@@ -1697,7 +1789,8 @@ function openEvidenceReview(preview, restored = false) {
         });
         inputs.push(checkbox);
       }
-      const card = reviewItem(item, paperUrl, checkbox, effectiveField(itemIndex));
+      const pageEndpoint = actionable ? "/api/evidence-page/" + preview.id + "/" + index + "/" + itemIndex + ".png" : null;
+      const card = reviewItem(item, paperUrl, checkbox, effectiveField(itemIndex), pageEndpoint);
       itemFieldNodes[itemIndex] = card.querySelector(".review-item-field");
       section.append(card);
     });
@@ -1761,12 +1854,13 @@ function appendEvidenceResults(article, results) {
   article.append(list);
 }
 
-function appendSavedComparison(article, comparison) {
+function comparisonTable(comparison) {
   const region = make("div", undefined, "saved-comparison");
   region.tabIndex = 0;
   region.setAttribute("role", "region");
-  region.setAttribute("aria-label", "两篇收藏的逐项对照");
+  region.setAttribute("aria-label", comparison.papers.length + " 篇收藏的逐项对照");
   const table = document.createElement("table");
+  if (comparison.papers.length > 2) table.style.minWidth = (100 + comparison.papers.length * 175) + "px";
   const header = table.createTHead().insertRow();
   const heading = text => {
     const cell = make("th", text);
@@ -1804,13 +1898,22 @@ function appendSavedComparison(article, comparison) {
     }
   }
   region.append(table);
+  return region;
+}
+
+function openComparison(comparison) {
+  byId("comparison-title").textContent = comparison.table_name + " · " + comparison.papers.length + " 篇论文对照";
+  byId("comparison-body").replaceChildren(comparisonTable(comparison));
+  const copy = byId("copy-comparison");
+  copy.onclick = () => copyWithFeedback(copy, comparison.markdown, "复制 Markdown");
+  if (!byId("comparison-detail").open) byId("comparison-detail").showModal();
+}
+
+function appendSavedComparison(article, comparison) {
+  const region = comparisonTable(comparison);
   const expand = make("button", "展开对照", "paper-detail-pill expand-comparison");
   expand.type = "button";
-  expand.addEventListener("click", () => {
-    byId("comparison-title").textContent = comparison.table_name + " · 论文对照";
-    byId("comparison-body").replaceChildren(region.cloneNode(true));
-    byId("comparison-detail").showModal();
-  });
+  expand.addEventListener("click", () => openComparison(comparison));
   article.append(region, expand);
 }
 
@@ -1907,7 +2010,7 @@ async function submit(text) {
     pendingId = result.pending_id || null;
 
     const comparison = result.saved_comparison;
-    const { article } = appendMessage(comparison ? "已从「" + comparison.table_name + "」读取两篇收藏的对应字段。"
+    const { article } = appendMessage(comparison ? "已从「" + comparison.table_name + "」读取 " + comparison.papers.length + " 篇收藏的对应字段。"
       : result.message || "已完成。", "assistant");
     if (comparison) appendSavedComparison(article, comparison);
     appendModelTrace(article, result.agent);
@@ -2195,18 +2298,51 @@ byId("reset-library-filter").addEventListener("click", () => {
   renderLibraryRows();
   byId("library-query").focus();
 });
-byId("export-local").addEventListener("click", async () => {
+function recordsRequest(action, body, viewId = state.table_view_id) {
+  return api("/api/records/" + action, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...body, table_view_id: viewId }) });
+}
+
+byId("compare-mode").addEventListener("click", () => {
+  choosingComparison = !choosingComparison;
+  if (!choosingComparison) comparedRecords.clear();
+  renderLibraryRows();
+});
+byId("compare-selected").addEventListener("click", async () => {
+  const button = byId("compare-selected");
+  button.disabled = true;
+  const viewId = state.table_view_id;
   try {
-    const snapshot = await api("/api/state");
-    if (!snapshot.reading_progress) throw new Error("请先打开本地阅读清单");
-    const rows = snapshot.rows.map(row => ({...row, reading_progress: snapshot.reading_progress[row.id] || "待读"}));
-    const file = { table: snapshot.table_name, exported_at: new Date().toISOString(), fields: snapshot.fields, rows };
-    const url = URL.createObjectURL(new Blob([JSON.stringify(file, null, 2)], {type: "application/json"}));
+    const data = await recordsRequest("compare", {records: [...comparedRecords.values()]}, viewId);
+    if (state.table_view_id === viewId && choosingComparison) openComparison(data);
+  } catch (err) { showToast(err.message, "error"); await refreshState(); }
+  finally { renderSelection(); }
+});
+
+byId("export-format").addEventListener("change", async event => {
+  const format = event.target.value;
+  event.target.value = "";
+  if (!format) return;
+  const viewId = state.table_view_id;
+  const filename = (state.table_name || "阅读清单").replace(/[<>:"/\\|?*]/g, "_");
+  try {
+    let data;
+    if (format === "json") {
+      const snapshot = await api("/api/state");
+      if (snapshot.table_view_id !== viewId || !snapshot.reading_progress) throw new Error("请在当前本地清单重新导出。");
+      const rows = snapshot.rows.map(row => ({...row, reading_progress: snapshot.reading_progress[row.id] || "待读"}));
+      const file = { table: snapshot.table_name, exported_at: new Date().toISOString(), fields: snapshot.fields, rows };
+      data = {content: JSON.stringify(file, null, 2), extension: "json", mime: "application/json", count: rows.length};
+    } else {
+      data = await recordsRequest("export", {format}, viewId);
+    }
+    const url = URL.createObjectURL(new Blob([data.content], {type: data.mime}));
     const link = document.createElement("a");
     link.href = url;
-    link.download = (snapshot.table_name || "阅读清单").replace(/[<>:"/\\|?*]/g, "_") + ".json";
+    link.download = filename + "." + data.extension.replace(/^\./, "");
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 30000);
+    showToast(data.notice || "已导出 " + data.count + " 条记录");
   } catch (err) { showToast(err.message, "error"); }
 });
 const reviewDialog = byId("evidence-review");

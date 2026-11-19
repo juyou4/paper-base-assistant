@@ -29,7 +29,8 @@ def _keys(url):
 
 def known_sources(table, row, anchor):
     with table._lock:
-        _registry(table)
+        if not table._db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='library_sources'").fetchone():
+            return []
         return [r[0] for r in table._db.execute(
             "SELECT DISTINCT source_url FROM library_sources WHERE scope=? AND record_id=? AND anchor_key=?",
             (_scope(table), row["id"], _identity(anchor)))]
@@ -37,7 +38,8 @@ def known_sources(table, row, anchor):
 
 def stored_metadata(table, row, anchor):
     with table._lock:
-        _registry(table)
+        if not table._db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='library_metadata'").fetchone():
+            return {}
         hit = table._db.execute("SELECT metadata FROM library_metadata WHERE scope=? AND record_id=? AND anchor_key=?",
                                 (_scope(table), row["id"], _identity(anchor))).fetchone()
         return json.loads(hit[0]) if hit else {}
@@ -118,7 +120,7 @@ def remember(table, row, paper, aliases):
                    for url in dict.fromkeys([anchor, *aliases]) for key in _keys(url)]
         table._db.executemany("INSERT OR IGNORE INTO library_sources VALUES(?,?,?,?,?)", entries)
         previous = stored_metadata(table, row, anchor)
-        for name in ("title", "authors", "year", "doi", "pdf_url", "source_version", "source_note"):
+        for name in ("title", "authors", "year", "doi", "pdf_url", "source_version", "source_note", "venue", "publication_type"):
             if paper.get(name):
                 previous[name] = paper[name]
         if previous.get("pdf_url"):

@@ -4,7 +4,7 @@ import re
 
 from activity import step
 from evidence_workflow import _FIELD_NAMES, _KIND_NAMES
-from saved_paper_dialog import column_names, matching_rows
+from saved_paper_dialog import _identity, column_names, matching_rows
 
 
 _LABELS = {
@@ -13,6 +13,9 @@ _LABELS = {
     "关键数据": ("关键数据", "实验数据", "实验结果", "关键指标", "实验指标", "指标"),
     "图表": ("图表", "关键图表", "图表摘录", "图题"),
     "公式": ("公式", "关键公式"),
+    "资源链接": ("资源链接", "开源资源"),
+    "代码链接": ("代码链接", "代码仓库", "开源代码"),
+    "模型链接": ("模型链接", "模型权重"), "数据集链接": ("数据集链接", "数据链接"),
     "笔记": ("笔记",), "阅读笔记": ("阅读笔记",), "研究笔记": ("研究笔记",),
 }
 _TERMS = {term: label for label, terms in _LABELS.items() for term in terms}
@@ -32,9 +35,11 @@ _AND = re.compile(r"以及|和|与|跟|、|\s+and\s+|\s+vs\.?\s+|\s+&\s+", re.I)
 _PLAIN = re.compile(r"[\w][\w .+:’'()_-]{0,199}")
 _OTHER = re.compile(r"https?://|网上|全网|外部|查原文|读原文|原文中|重新提取|同时|然后|接着|顺便|"
                     r"写入|回填|删除|修改|授权|不要|不用|禁止|如果|假设|先别|第[一二两三\d]+篇")
-_EVIDENCE = {"关键数据": ("metric",), "图表": ("figure", "table"), "公式": ("formula",)}
+_EVIDENCE = {"关键数据": ("metric",), "图表": ("figure", "table"), "公式": ("formula",),
+             "资源链接": ("code", "model", "dataset"),
+             "代码链接": ("code",), "模型链接": ("model",), "数据集链接": ("dataset",)}
 _BLOCK = re.compile(r"(?m)^【(?:" + "|".join(_KIND_NAMES.values()) + r")】")
-_HELP = "请用《》分别标出两篇已收藏论文的题名或简称，例如“对比我收藏的《论文甲》和《论文乙》的方法和关键数据”。"
+_HELP = "请用《》分别标出 2 至 4 篇已收藏论文的题名或简称，例如“对比我收藏的《论文甲》和《论文乙》的方法和关键数据”。"
 
 
 def _request(message):
@@ -44,7 +49,7 @@ def _request(message):
         return None
     body, scoped = _SOURCE_PREFIX.subn("", match["body"], count=1)
     scoped = scoped or match.groupdict().get("scope")
-    body = re.sub(r"^(?:这?两篇(?:论文|文献|文章)?|论文|文献)\s*[：:]?\s*(?=[《「“\"])", "", body)
+    body = re.sub(r"^(?:这?[两二三四2-4]篇(?:论文|文献|文章)?|论文|文献)\s*[：:]?\s*(?=[《「“\"])", "", body)
     masked = _QUOTED.sub(lambda quoted: " " * len(quoted[0]), body)
     if _OTHER.search(masked):
         if scoped and re.search(r"写入|回填|删除|修改|授权", masked):
@@ -53,10 +58,16 @@ def _request(message):
     wanted = _FIELD_END.search(masked)
     labels = list(dict.fromkeys(_TERMS[t] for t in re.split(_SEPARATOR, wanted[1]))) if wanted else ["方法", "关键数据", "笔记"]
     pair = body[:wanted.start()].strip() if wanted else body.strip()
-    pair = re.sub(r"(?<=[》」”\"])\s*(?:这|那)两篇(?:论文|文献|文章)?$", "", pair)
+    pair = re.sub(r"(?<=[》」”\"])\s*(?:这|那)[两二三四2-4]篇(?:论文|文献|文章)?$", "", pair)
     quotes = list(_QUOTED.finditer(pair))
-    if not scoped and len(quotes) != 2:
+    if not scoped and len(quotes) < 2:
         return None
+    if len(quotes) >= 3:
+        separators = [pair[a.end():b.start()].strip() for a, b in zip(quotes, quotes[1:])]
+        if (len(quotes) > 4 or pair[:quotes[0].start()].strip() or pair[quotes[-1].end():].strip()
+                or not all(re.fullmatch(r"(?:、|，|,)?\s*(?:和|与|跟|及|以及|and|&)?", s, re.I) for s in separators)):
+            return [], labels
+        return [q[0][1:-1].strip() for q in quotes], labels
     if quotes and pair[quotes[-1].end():].strip().startswith("的"):
         return ("可以比较已保存的摘要、方法、关键数据、图表、公式和笔记。想先看哪一项？"
                 if scoped else None)
@@ -93,8 +104,8 @@ def _values(schema, label, row):
     kinds = _EVIDENCE.get(label)
     if kinds:
         notes = set(column_names(schema, "笔记")[2])
-        tagged = tuple(f"【{_KIND_NAMES[kind]}】" for kind in kinds)
-        names = {name for kind in kinds for name in _FIELD_NAMES[kind]} | notes | set(_LABELS[label])
+        tagged = tuple(f"【{_KIND_NAMES[kind]}】" for kind in kinds if kind in _KIND_NAMES)
+        names = {name for kind in kinds for name in _FIELD_NAMES.get(kind, ())} | notes | set(_LABELS[label])
     else:
         names = set(column_names(schema, label)[2])
     values = []
@@ -103,12 +114,45 @@ def _values(schema, label, row):
         if name not in names or fields.get(name) is None:
             continue
         value = str(fields[name])
-        if kinds and name in notes:
+        if kinds and (name in notes or name == "资源链接" and label != "资源链接"):
             # 专用列保存原值；通用笔记只引用已带相应类型标签的原文段落。
             value = _tagged_notes(value, tagged)
         if value.strip():
             values.append({"field": name, "value": value})
     return values
+
+
+def read_selection(chat, schema, references, minimum=2, maximum=4):
+    if not isinstance(references, list) or not minimum <= len(references) <= maximum:
+        raise ValueError(f"请选择 {minimum} 至 {maximum} 条当前表的论文。")
+    titles, links, _ = column_names(schema)
+    selected = []
+    seen = set()
+    for ref in references:
+        if (not isinstance(ref, dict) or set(ref) != {"id", "title", "url"} or
+                not all(isinstance(v, str) for v in ref.values()) or not ref["id"] or
+                ref["id"] in seen or not (ref["title"] or ref["url"])):
+            raise ValueError("请选择不同的、可识别的论文记录。")
+        row = chat.table.get(ref["id"])
+        if row["id"] != ref["id"] or _identity(row, titles, links) != (ref["title"], ref["url"]):
+            raise ValueError("选中论文的题名或链接已变化。请刷新清单后重新选择。")
+        seen.add(ref["id"])
+        selected.append((row, ref["title"], ref["url"]))
+    return selected
+
+
+def comparison_data(table_name, schema, selected, labels):
+    from research_exports import markdown_cell
+    papers = [{"record_id": row["id"], "title": title, "url": url} for row, title, url in selected]
+    fields = [{"label": label, "values": [_values(schema, label, row) for row, _, _ in selected]}
+              for label in labels]
+    cells = [["比较项", *[p["title"] or p["url"] for p in papers]],
+             ["---"] * (len(papers) + 1), ["论文链接", *[p["url"] or "未保存" for p in papers]]]
+    for field in fields:
+        cells.append([field["label"], *["\n\n".join(item["field"] + " · " + item["value"] for item in values)
+                                       or "未保存" for values in field["values"]]])
+    markdown = "\n".join("| " + " | ".join(markdown_cell(cell) for cell in row) + " |" for row in cells)
+    return {"table_name": table_name, "papers": papers, "fields": fields, "markdown": markdown}
 
 
 def handle(chat, message):
@@ -126,7 +170,7 @@ def handle(chat, message):
         return {**reply, "message": _HELP}
     schema = chat._read_schema()
     titles, links, _ = column_names(schema)
-    with step("按两个题名回读当前表中的收藏", tool=chat.table_tool):
+    with step("按题名回读当前表中的收藏", tool=chat.table_tool):
         rows = chat.table.rows()
         matches = [matching_rows(rows, hint, titles, links) for hint in hints]
     problems = []
@@ -142,18 +186,16 @@ def handle(chat, message):
                 problems.append("存在同名记录，请先核对链接区分重复行。")
     if problems:
         return {**reply, "message": "\n".join([*problems, "请核对当前表，并用两篇完整题名重新对比。"])}
-    left, right = matches[0][0], matches[1][0]
-    if left[1]["id"] == right[1]["id"]:
-        return {**reply, "message": f"两个题名都指向当前表的同一条收藏《{left[2]}》。请再指定另一篇。"}
-    papers = [{"record_id": row["id"], "title": title, "url": url} for _, row, title, url, _ in (left, right)]
-    lines = [f"「{chat.table_name}」里的两篇收藏", *[
+    selected = [hits[0][1:4] for hits in matches]
+    if len({row["id"] for row, _, _ in selected}) < len(selected):
+        return {**reply, "message": "多个题名指向当前表的同一条收藏，请指定不同的论文。"}
+    data = comparison_data(chat.table_name, schema, selected, labels)
+    papers = data["papers"]
+    lines = [f"「{chat.table_name}」里的 {len(papers)} 篇收藏", *[
         f"{n}. 《{paper['title']}》\n   {paper['url'] or '未保存论文链接'}" for n, paper in enumerate(papers, 1)]]
-    comparison = []
-    for label in labels:
-        cells = [_values(schema, label, hit[1]) for hit in (left, right)]
-        comparison.append({"label": label, "values": cells})
-        lines.append(f"\n{label}")
-        for index, cell in enumerate(cells, 1):
+    for field in data["fields"]:
+        lines.append("\n" + field["label"])
+        for index, cell in enumerate(field["values"], 1):
             content = "\n".join(f"「{val['field']}」{val['value']}" for val in cell) or "未保存"
             lines.append(f"第{index}篇 · {content}")
     if not chat.pending:
@@ -162,5 +204,4 @@ def handle(chat, message):
         _bind(chat)
         remember_results(chat, [(p["record_id"], p["title"], p["url"]) for p in papers], None)
         lines.append("\n可以说“打开第一篇”或“打开第二篇”查看对应记录。")
-    return {**reply, "message": "\n".join(lines), "saved_comparison": {
-        "table_name": chat.table_name, "papers": papers, "fields": comparison}}
+    return {**reply, "message": "\n".join(lines), "saved_comparison": data}

@@ -232,6 +232,17 @@ def _authors(meta):
             for a in meta.get("author", []) if isinstance(a, dict)]
 
 
+def citation_venue(tags):
+    """只有出版页明示期刊或会议时，才记录相应的引用类型。"""
+    journal = _plain(tags.get("citation_journal_title"))
+    conference = _plain(tags.get("citation_conference_title"))
+    if journal and not conference:
+        return {"publication_type": "journal", "venue": journal}
+    if conference and not journal:
+        return {"publication_type": "conference", "venue": conference}
+    return {}
+
+
 def search_titles(query, read):
     title = _plain(query)
     if not title:
@@ -327,6 +338,8 @@ def _set_cvf(result, page):
     result["evidence_urls"].append(page["url"])
     result.update(title=page["title"], authors=page["authors"], year=page["year"],
                   pdf_url=page["pdf_url"], source_version="CVF 公开录用稿")
+    if page.get("venue"):
+        result.update(publication_type="conference", venue=result.get("venue") or page["venue"])
     if page["abstract"]:
         result.update(abstract_original=page["abstract"], abstract_source="CVF 作者摘要", abstract_url=page["url"])
 
@@ -335,7 +348,8 @@ def _set_crossref(result, meta):
     doi = _doi(meta.get("DOI", ""))
     landing = doi_url(doi)
     result.update(doi=doi, url=landing, key="doi:" + doi, title=_first(meta, "title"),
-                  authors=_authors(meta), year=_year(meta))
+                  authors=_authors(meta), year=_year(meta), venue=_first(meta, "container-title"),
+                  publication_type={"journal-article": "journal", "proceedings-article": "conference"}.get(meta.get("type"), ""))
     result["aliases"].append(landing)
     resource = meta.get("resource", {}).get("primary", {}).get("URL", "")
     kind, _, primary = _identifier(resource)
@@ -413,7 +427,7 @@ def _ieee(read, result, ident):
     title = title or _plain(embedded.get("title", ""))
     doi = doi or _doi(embedded.get("doi") or "")
     if title:
-        result.update(title=title, authors=page.authors)
+        result.update(title=title, authors=page.authors, **citation_venue(page.meta))
         abstract = _plain(embedded.get("abstract", "")) or page.meta.get("citation_abstract", "")
         if abstract:
             result.update(abstract_original=abstract, abstract_source="IEEE 出版方摘要", abstract_url=result["url"])

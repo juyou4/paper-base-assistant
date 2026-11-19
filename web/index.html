@@ -243,7 +243,11 @@
               <select id="reading-filter" class="paper-detail-pill" aria-label="筛选本地阅读进度" hidden>
                 <option value="">全部进度</option><option>待读</option><option>在读</option><option>已读</option>
               </select>
-              <button type="button" id="export-local" class="paper-detail-pill" hidden>导出当前表</button>
+              <button type="button" id="compare-mode" class="paper-detail-pill" aria-pressed="false">选择对照</button>
+              <select id="export-format" class="paper-detail-pill" aria-label="导出当前清单">
+                <option value="">导出清单…</option><option value="bib">BibTeX</option><option value="ris">RIS</option>
+                <option value="md">Markdown</option><option value="csv">CSV</option><option value="json">本地备份 JSON</option>
+              </select>
               <a class="icon-pill feishu-link" id="feishu-link" target="_blank" rel="noopener noreferrer" hidden>
                 打开飞书表格
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -279,6 +283,12 @@
             <input id="library-query" type="search" aria-label="筛选当前表的论文" placeholder="在当前表搜题名、简称或笔记" autocomplete="off" aria-controls="records-stage">
             <button type="button" class="paper-detail-pill" id="reset-library-filter" hidden>清除筛选</button>
             <span id="filter-count" role="status"></span>
+          </div>
+
+          <div id="selection-bar" class="selection-bar" hidden>
+            <span id="selection-count" role="status">请选择 2 至 4 篇</span>
+            <div id="selection-chips"></div>
+            <button id="compare-selected" type="button" class="paper-detail-pill" disabled>打开对照</button>
           </div>
 
           <!-- 字段胶囊条 -->
@@ -375,6 +385,7 @@
     <div class="detail-shell">
       <div class="detail-head">
         <h2 id="comparison-title">论文对照</h2>
+        <button id="copy-comparison" type="button" class="paper-detail-pill"><span class="copy-txt">复制 Markdown</span></button>
         <button type="button" class="icon-pill close-btn" id="close-comparison" aria-label="关闭论文对照">关闭</button>
       </div>
       <div id="comparison-body"></div>
@@ -385,6 +396,7 @@
     <div class="detail-shell">
       <div class="detail-head">
         <h2>记录详情</h2>
+        <button id="copy-citation" type="button" class="paper-detail-pill"><span class="copy-txt">复制 BibTeX</span></button>
         <button id="close-detail" type="button" class="icon-pill close-btn" aria-label="关闭记录详情">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M18 6 6 18M6 6l12 12"/>

@@ -2006,6 +2006,16 @@ textarea::placeholder {
 .saved-comparison tbody tr:last-child > * { border-bottom: none; }
 .saved-comparison small { display: block; margin-bottom: 3px; color: var(--muted); }
 .expand-comparison { margin-top: 7px; }
+.selection-bar, #selection-chips {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+}
+.selection-bar { padding: 8px 20px; border-top: 1px solid var(--border); color: var(--ink-secondary); font-size: 12px; }
+.selection-chip { display: block; max-width: 14em; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.compare-pick[aria-pressed="true"], #compare-mode[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); }
+.pdf-page img { display: block; width: 100%; height: auto; margin: 8px 0; border-radius: 8px; }
+.pdf-page > span { display: block; margin: 8px 0; font-size: 12px; color: var(--ink-secondary); }
+#comparison-detail .detail-head, #detail .detail-head { flex-wrap: wrap; }
+#comparison-detail h2, #detail .detail-head h2 { margin-right: auto; }
 #comparison-detail { width: 800px; max-width: 94vw; }
 #comparison-body { overflow: auto; padding: 0 18px 16px; }
 #comparison-body .saved-comparison table { font-size: 14px; }

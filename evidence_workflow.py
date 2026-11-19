@@ -7,6 +7,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
 from activity import step
+from paper_resources import KINDS as RESOURCE_KINDS, LABELS as RESOURCE_LABELS, valid_resource
 from papers import _find_target
 from preflight import _same_article
 from source_library import existing_source, remember
@@ -18,10 +19,13 @@ _FIELD_NAMES = {
     "figure": ("论文图", "关键图", "图表", "关键图表", "图表摘录", "研究笔记"),
     "table": ("论文表格", "数据表格", "图表", "关键图表", "图表摘录", "研究笔记"),
     "formula": ("论文公式", "关键公式", "公式", "研究笔记", "阅读笔记"),
+    "code": ("代码链接", "代码仓库", "开源代码", "项目代码", "资源链接", "研究笔记", "阅读笔记"),
+    "model": ("模型链接", "模型权重", "模型资源", "资源链接", "研究笔记", "阅读笔记"),
+    "dataset": ("数据集链接", "数据集地址", "数据集", "资源链接", "研究笔记", "阅读笔记"),
     "title": ("论文标题", "文献标题", "论文名称", "标题", "题名", "title"),
     "url": ("论文链接", "论文地址", "原文链接", "原文地址", "文献链接", "预印本链接", "URL"),
 }
-_KIND_NAMES = {"metric": "指标", "figure": "图", "table": "表", "formula": "公式"}
+_KIND_NAMES = {"metric": "指标", "figure": "图", "table": "表", "formula": "公式", **RESOURCE_LABELS}
 MAX_PAPERS = 8
 
 
@@ -32,6 +36,8 @@ def _field(schema, kind, label=None):
         if name.casefold() in eligible:
             return eligible[name.casefold()]
     choices = "、".join(_FIELD_NAMES[kind])
+    if kind in RESOURCE_KINDS:
+        raise ValueError(f"资源证据需要文本列以保存候选链接、原文摘录和出处；可用列名为{choices}。")
     raise ValueError(f"未找到可写的{_KIND_NAMES.get(kind, '论文标识')}列。可用列名为{choices}。")
 
 
@@ -135,7 +141,8 @@ def _prepare_one(table, url, entry, schema, rows):
         columns["title"] = _field(schema, "title")
     except ValueError:
         pass  # 链接标识足以确定论文，标题列可选。
-    id_names = {col["name"] for col in columns.values()}
+    identity_aliases = {name.casefold() for kind in ("title", "url") for name in _FIELD_NAMES[kind]}
+    id_names = {col["name"] for col in schema if col["name"].casefold() in identity_aliases}
     writable_columns = [col["name"] for col in schema if col["type"] == "text" and col["name"] not in id_names]
     for item in entry["items"]:
         column = _field(schema, item["kind"], item["label"])
@@ -164,8 +171,12 @@ def _prepare_one(table, url, entry, schema, rows):
 
 def _extract_one(number, entry, requested, key, wanted, extract_fn):
     with step(f"提取第 {number} 篇论文的原文证据", tool="论文解析"):
-        paper = (extract_fn(requested, include_formulas=True) if "formula" in wanted
-                 else extract_fn(requested))
+        options = {}
+        if "formula" in wanted:
+            options["include_formulas"] = True
+        if any(kind in RESOURCE_KINDS for kind in wanted):
+            options["include_resources"] = True
+        paper = extract_fn(requested, **options)
         evidence_urls = paper.get("evidence_urls", ())
         # CVF 等出版页面可能解析成 DOI。仅接受解析器为该版本核实的原始入口。
         if not (_same_source(requested, paper["url"]) or
@@ -183,8 +194,23 @@ def _extract_one(number, entry, requested, key, wanted, extract_fn):
                 raise ValueError(note)
             entry["notice"] = note
         if not entry["items"]:
+            if options.get("include_resources"):
+                raise ValueError("在已读取的论文正文中没有找到所请求的 GitHub、GitLab 或 Hugging Face 资源链接。")
             raise ValueError("论文中未取得该类型的可定位原文证据。")
+        if options.get("include_resources"):
+            missing = [RESOURCE_LABELS[k] for k in RESOURCE_KINDS
+                       if k in wanted and not any(i["kind"] == k for i in entry["items"])]
+            hints = [entry.get("notice", "")]
+            if missing:
+                hints.append("本次未找到：" + "、".join(missing) + "。")
+            if any(i["kind"] in RESOURCE_KINDS for i in entry["items"]):
+                hints.append("资源候选也可能属于基线或引用工作。请核对摘录，勾选要保存的链接。")
+            if any(i.get("resource_total") for i in entry["items"]):
+                hints.append("每种资源最多展示 12 个不同地址。")
+            entry["notice"] = " ".join(filter(None, hints))
         for item in entry["items"]:
+            if item["kind"] in RESOURCE_KINDS and not valid_resource(item):
+                raise ValueError("资源链接与原文候选类型不一致，请重新预览。")
             if item["kind"] == "formula" and not (
                 isinstance(item.get("latex"), str) and item["latex"].strip()
             ):
@@ -209,7 +235,7 @@ def prepare(table, urls, kinds=None):
     scopes = kinds if isinstance(kinds, dict) else dict.fromkeys(urls, ("metric", "figure", "table") if kinds is None else kinds)
     if any(not isinstance(scope, (tuple, list, set, frozenset)) or not scope or
            not set(scope) <= _KIND_NAMES.keys() for scope in scopes.values()):
-        raise ValueError("请指定关键数据、图、表或公式。")
+        raise ValueError("请指定关键数据、图、表、公式或论文资源链接。")
     tool = getattr(table, "tool_name", None)
     with step("读取回填目标字段和现有记录", tool=tool):
         schema, rows = table.schema(), table.rows()
@@ -268,6 +294,8 @@ def prepare(table, urls, kinds=None):
                 target = anchor if anchor and _identity(anchor) != _identity(entry["url"]) else entry["url"]
                 draft = _prepare_one(table, target, entry, schema, rows)
                 draft["aliases"] = aliases
+                draft["bibliography"] = {k: paper[k] for k in ("title", "authors", "year", "doi", "venue", "publication_type")
+                                         if paper.get(k)}
                 if target != entry["url"]:
                     entry["target_url"] = target
                 prepared_keys.update(keys)
@@ -372,6 +400,11 @@ def commit(table, plan, selection=None, field_overrides=None):
     with table._lock:
         if "result" in plan:
             return plan["result"]
+        if selection is None and any(i["kind"] in RESOURCE_KINDS for entry in plan["entries"] for i in entry["items"]):
+            selection = [[idx for idx, item in enumerate(entry["items"]) if item["kind"] not in RESOURCE_KINDS]
+                         if draft else [] for entry, draft in zip(plan["entries"], plan["drafts"])]
+            if not any(selection):
+                raise ValueError("请在预览中核对原文，逐项勾选要保存的资源候选。")
         drafts = _selected_drafts(plan, selection, field_overrides=field_overrides)
         results = []
         for number, (entry, draft) in enumerate(zip(plan["entries"], drafts), 1):
@@ -403,7 +436,7 @@ def commit(table, plan, selection=None, field_overrides=None):
                     if (draft["record_id"] and saved["id"] != draft["record_id"] or
                             any(saved["fields"].get(n) != v for n, v in draft["values"].items())):
                         raise ValueError("回读记录或字段值与确认内容不符。")
-                    remember(table, saved, {"url": draft["target_url"]}, draft["aliases"])
+                    remember(table, saved, {**draft.get("bibliography", {}), "url": draft["target_url"]}, draft["aliases"])
                 items = len(entry["items"]) if selection is None else len(selection[number - 1])
                 result.update(status="verified", selected_items=items,
                               message=f"已核对 {items} 项证据和 {len(draft['values'])} 个字段，回读一致。")

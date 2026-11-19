@@ -105,7 +105,8 @@ def _inspect(path):
 class AttachmentLibrary:
     def __init__(self, directory, cookie):
         owner = hashlib.sha256(cookie.encode()).hexdigest()
-        self.directory = Path(directory) / "attachments" / owner
+        self.data_dir = Path(directory)
+        self.directory = self.data_dir / "attachments" / owner
         self.index = self.directory / "index.sqlite3"
 
     def _db(self):

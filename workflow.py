@@ -51,9 +51,16 @@ EVIDENCE_TERMS = {
                         r"(?:哪些|几[张个]|的|只要|只看|提取|和|跟|与|及|、|/)表(?=[里中和与，。！？\s]|$)|\btables?\b", re.I),
     "formula": re.compile(r"公式|方程|数学表达式|损失函数|目标函数|概率表达式|计算式|"
                           r"\b(?:latex|equations?|formul(?:a|as|ae))\b", re.I),
+    "code": re.compile(r"代码(?:仓库|地址|链接|实现)?|源码|开源实现|项目仓库|仓库链接|"
+                       r"开源资源|配套资源|\b(?:github|gitlab|code\s+repositor(?:y|ies))\b", re.I),
+    "model": re.compile(r"(?:模型|权重)(?:的)?(?:权重|地址|链接|仓库|资源|下载)|预训练权重|"
+                        r"开源资源|配套资源|\b(?:model\s+(?:weights?|links?)|checkpoints?)\b", re.I),
+    "dataset": re.compile(r"数据集(?:的)?(?:链接|地址|仓库|资源|下载)|开源资源|配套资源|"
+                          r"\bdataset\s+(?:links?|repositor(?:y|ies))\b", re.I),
 }
 SCOPE_CHOICES = {"预览数据和图表": ["metric", "figure", "table"], "只看关键数据": ["metric"],
-                 "只看图表": ["figure", "table"], "只看公式": ["formula"]}
+                 "只看图表": ["figure", "table"], "只看公式": ["formula"], "查看配套资源": ["code", "model", "dataset"]}
+STANDARD_EVIDENCE = ["metric", "figure", "table", "formula"]
 PAPER_CONTEXT = re.compile(r"论文|文献|文章|研究里|paper\b|这[一几两三]?[篇份]|那[一几两三]?[篇份]", re.I)
 PREVIOUS_REF = re.compile(r"刚才|刚刚|上(?:面|次|一[批篇轮])|这[一几两三]?[批篇份]|那[一几两三]?[批篇份]|它[们俩]?|接着|还是|再看|也看")
 REPEAT_SCOPE = re.compile(r"照旧|照[刚上]次|按.{0,6}(?:来|一样|处理)|同样|一样(?:来|处理)|也(?:来|做|跑|处理)一[遍下]|也这么")
@@ -104,6 +111,9 @@ def _evidence_urls(message):
 def _evidence_scope(text):
     # “放进飞书表格”是目的地；只有原文中的表格才是提取对象。
     content = re.sub(r"(?:飞书|多维|当前|这张|目标)(?:多维)?(?:数据)?表格?|(?:到|进|入)(?:对应的?)?表格?", "", text)
+    # “收藏公开了代码的论文”描述选篇条件，不能把它解释为提取代码地址。
+    if PLAIN_SAVE.search(content):
+        content = re.sub(r"(?:会发|有|提供|带有|附带|公开|发布|开源)(?:了)?(?:代码(?:仓库|链接)?|模型权重|数据集链接)的(?:那些)?(?:论文|文章|文献)", "", content)
     wanted, excluded = set(), set()
     for clause in re.split(r"[，,；;。\n]|但是|不过|只(?=要|看|留)", content):
         if re.search(r"(?:先|暂时)?(?:不用|不要|不看)(?:了)?\s*$", clause):
@@ -189,6 +199,10 @@ def _fields(schema, kind, hint=""):
     if hint:
         exact = [f for f in valid if _normalized(f["name"]) == _normalized(hint)]
         return exact or [f for f in valid if _normalized(hint) in _normalized(f["name"])]
+    if kind == "url":
+        valid = [f for f in valid if not re.search(r"资源|代码|源码|仓库|权重|模型|数据集|原图|开源|"
+                                                    r"github|gitlab|hugging\s*face|repo|dataset|model|code",
+                                                    f["name"], re.I)]
     aliases = ROLES[kind]
     matches = [f for f in valid if _normalized(f["name"]) in [_normalized(a) for a in aliases]]
     if not matches:
@@ -252,6 +266,7 @@ def _parse(message, table_name):
 class Conversation:
     def __init__(self, table, data_dir, table_name, base_url="", base_name=""):
         self.table = table
+        self.table_view_id = uuid.uuid4().hex
         self.table_tool = getattr(table, "tool_name", None)
         self.data_dir = data_dir
         self.table_name = table_name
@@ -275,6 +290,7 @@ class Conversation:
 
     def select_table(self, table, name, base_name, base_url):
         self.table, self.table_name = table, name
+        self.table_view_id = uuid.uuid4().hex
         self.base_name, self.base_url = base_name, base_url
         self.table_tool = getattr(table, "tool_name", None)
         self.last = self.last_title = self.pending = None
@@ -1044,7 +1060,7 @@ class Conversation:
                     grouped = _kinds_by_paper(text, candidates)
                     positions = _preview_positions(text, candidates)
                     if positions == [] and candidates:
-                        return self._ask_evidence_papers(candidates, _evidence_kinds(text) or list(EVIDENCE_TERMS))
+                        return self._ask_evidence_papers(candidates, _evidence_kinds(text) or list(STANDARD_EVIDENCE))
                     if grouped:
                         return self._preview_evidence(list(grouped), grouped)
                     urls = [candidates[i] for i in positions] if positions else explicit or self._previous_evidence_urls(
@@ -1064,7 +1080,7 @@ class Conversation:
                         self.pending = None
                         return {"message": "已取消提取。"}
                     if not kinds and re.fullmatch(r"(?:好[的啊]?|可以|全部|都(?:要|看|行)|都看看|先看看)[。！!]?", message):
-                        kinds = list(EVIDENCE_TERMS)
+                        kinds = list(STANDARD_EVIDENCE)
                     return self._start_evidence(urls, kinds) if kinds else self._ask_evidence_scope(urls)
                 if stage == "collection_choice":
                     if pending_id != task["id"]:

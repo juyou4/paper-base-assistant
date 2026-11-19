@@ -6,9 +6,11 @@ import subprocess
 import tempfile
 from collections import Counter
 from html.parser import HTMLParser
+from pathlib import Path
 from urllib.parse import quote, urljoin, urlsplit
 
 import papers
+from paper_resources import html_resource_items, pdf_resource_items
 from math_evidence import FormulaReader, MathNode, formula_item
 
 
@@ -407,6 +409,7 @@ def _pdf_tables(path, paper, text):
 
 
 def _file_evidence(pdf, paper):
+    initial_stat = Path(pdf).stat()
     executable = shutil.which("pdftotext")
     text = ""
     if executable:
@@ -425,25 +428,34 @@ def _file_evidence(pdf, paper):
             # PDFMiner 在部分损坏文件上也会抛出独立的解析异常，留给逐篇结果提示。
             pass
     structured = _pdf_tables(pdf, paper, text)
+    if paper.get("include_resources"):
+        structured.extend(pdf_resource_items(text, paper["pdf_url"]))
     covered = {(i["source_url"], i["label"].casefold()) for i in structured if i["kind"] == "table"}
     captions = [i for i in _pdf_items(text, paper["pdf_url"])
                 if (i["source_url"], i["label"].casefold()) not in covered]
     if not text.strip() and not structured:
         raise ValueError("未读到 PDF 正文。请检查文件，扫描件请先提供带 OCR 文本层的副本。")
-    return structured + captions
+    from pdf_page_preview import annotate
+    return annotate(structured + captions, paper["pdf_url"], pdf, initial_stat=initial_stat)
 
 
 def _pdf_evidence(paper):
+    from paper_attachments import ACTIVE
+    library = ACTIVE.get()
+    if library is not None:
+        # 审阅期间继续使用提取时的文件；公开全文缓存按已核实的官网 PDF 地址定位。
+        return _file_evidence(papers.download_pdf(paper, library.data_dir), paper)
     with tempfile.TemporaryDirectory() as work:
         return _file_evidence(papers.download_pdf(paper, work), paper)
 
 
-def extract_evidence(url: str, *, include_formulas=False) -> dict:
+def extract_evidence(url: str, *, include_formulas=False, include_resources=False) -> dict:
     import paper_attachments
     attachment = paper_attachments.bound_file(url)
     if attachment:
         item, path = attachment
-        results = _file_evidence(path, {"pdf_url": item["viewer"], "title": item["title"]})
+        results = _file_evidence(path, {"pdf_url": item["viewer"], "title": item["title"],
+                                        "include_resources": include_resources})
         for evidence in results:
             evidence["public_source_url"] = item["paper_url"]
             evidence["source"] += " · 用户关联的 PDF · SHA-256 " + item["id"]
@@ -461,22 +473,26 @@ def extract_evidence(url: str, *, include_formulas=False) -> dict:
             html = papers._read_html(article, 5 * 1024 * 1024)
             preferred = {"1706.03762": "Table 2", "2005.11401": "Table 1"}.get(base_id)
             title, items = _article_evidence(html, article, preferred, include_formulas=include_formulas)
+            if include_resources:
+                items.extend(html_resource_items(html, article))
         except (OSError, ValueError):
             title, items = "", []
         if title and items:
             return {"title": title, "url": canonical, "items": items}
-        if sample and arxiv in (base_id, sample):
+        if not include_resources and sample and arxiv in (base_id, sample):
             title, items = _snapshot(sample, include_formulas=include_formulas)
             return {"title": title, "url": "https://arxiv.org/abs/" + sample, "items": items}
     with tempfile.TemporaryDirectory() as work:
         paper = papers.resolve_paper(url, work, find_pdf=True) if external else papers.resolve_paper(url, work)
     if not paper.get("pdf_url") or not paper.get("title"):
         raise ValueError(paper.get("source_note") or "暂未取得可核对的全文。可添加本地 PDF 并关联这篇论文。")
+    if include_resources:
+        paper = {**paper, "include_resources": True}
     items = _pdf_evidence(paper)
     if not items:
         raise ValueError("原文中未找到可核对的数据或图表；扫描版 PDF 可能需要 OCR。")
     result = {"title": paper["title"], "url": paper["url"], "items": items}
-    for key in ("evidence_urls", "aliases", "source_version"):
+    for key in ("evidence_urls", "aliases", "source_version", "authors", "year", "doi", "venue", "publication_type"):
         if key in paper:
             result[key] = paper[key]
     return result
