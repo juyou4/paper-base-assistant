@@ -138,9 +138,12 @@ class ActivityHTTPTests(unittest.TestCase):
         _, cookie = self.request("GET", "/api/state")
         failed_id, independent_id = str(uuid.uuid4()), str(uuid.uuid4())
         self.provider.side_effect = [ValueError("模型暂时不可用"), {"op": "columns"}, {"op": "columns"}]
-        error = self.chat(cookie, failed_id, self.query, expected=400)
+        error = self.chat(cookie, failed_id, "把阅读笔记这一列删掉", expected=400)
         first = self.progress(cookie, failed_id)
         self.assertTrue(error["error"])
+        self.assertIn("识别字段管理操作（失败）", error["agent"]["steps"])
+        self.assertEqual(error["agent"]["model"], "model-a")
+        self.assertIsNone(self.request("GET", "/api/state", cookie)[0]["pending_dialog"])
         self.assertEqual(error["activity"], first)
         self.assertTrue(first["finished"])
         self.assertIn("failed", [e["status"] for e in first["events"]])
@@ -157,6 +160,15 @@ class ActivityHTTPTests(unittest.TestCase):
         self.assertEqual(retry, self.progress(cookie, failed_id))
         self.assertEqual(independent, self.progress(cookie, independent_id))
         self.assertEqual(self.provider.call_count, 3)
+
+    def test_read_only_fallback_reports_the_actual_failed_attempt(self):
+        _, cookie = self.request("GET", "/api/state")
+        self.provider.side_effect = ValueError("模型暂时不可用")
+        result = self.chat(cookie, str(uuid.uuid4()), self.query)
+        self.assertIn("论文标题", result["message"])
+        self.assertEqual(result["agent"]["steps"], ["识别字段管理操作（失败）"])
+        self.assertIn("failed", [event["status"] for event in result["activity"]["events"]])
+        self.assertNotIn("pending_id", result)
 
     def test_invalid_poll_ids_and_unexpected_error_are_isolated(self):
         _, cookie = self.request("GET", "/api/state")

@@ -1,8 +1,10 @@
 """先展示论文证据与目标列，由同一会话确认后逐篇提交。"""
 
+import contextvars
 import json
 import uuid
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 from activity import step
 from papers import _find_target
@@ -133,6 +135,8 @@ def _prepare_one(table, url, entry, schema, rows):
         columns["title"] = _field(schema, "title")
     except ValueError:
         pass  # 链接标识足以确定论文，标题列可选。
+    id_names = {col["name"] for col in columns.values()}
+    writable_columns = [col["name"] for col in schema if col["type"] == "text" and col["name"] not in id_names]
     for item in entry["items"]:
         column = _field(schema, item["kind"], item["label"])
         if column in columns.values():
@@ -146,12 +150,52 @@ def _prepare_one(table, url, entry, schema, rows):
     _check_fields(schema, values)
     entry.update(action=("create" if row is None else
                          "unchanged" if all(m == "unchanged" for m in modes.values()) else "update"),
-                 fields=[{"name": name, "mode": mode} for name, mode in modes.items()], status="ready")
+                 fields=[{"name": name, "mode": mode} for name, mode in modes.items()],
+                 target_columns=writable_columns, status="ready")
+    all_schema = [dict(f) for f in schema if f["name"] in id_names or f["name"] in writable_columns]
+    all_before = {f["name"]: before.get(f["name"], "") for f in all_schema}
     return {"key": _paper_key(url), "target_url": url, "link": link, "title_col": title_col,
             "record_id": row["id"] if row else None, "before": {n: before.get(n, "") for n in values},
+            "all_before": all_before, "writable_columns": writable_columns,
             "patch": {n: v for n, v in values.items() if modes[n] != "unchanged"},
             "values": values, "schema": [dict(f) for f in schema if f["name"] in values],
-            "request_id": uuid.uuid4().hex}
+            "all_schema": all_schema, "request_id": uuid.uuid4().hex}
+
+
+def _extract_one(number, entry, requested, key, wanted, extract_fn):
+    with step(f"提取第 {number} 篇论文的原文证据", tool="论文解析"):
+        paper = (extract_fn(requested, include_formulas=True) if "formula" in wanted
+                 else extract_fn(requested))
+        evidence_urls = paper.get("evidence_urls", ())
+        # CVF 等出版页面可能解析成 DOI。仅接受解析器为该版本核实的原始入口。
+        if not (_same_source(requested, paper["url"]) or
+                (not key.startswith("arxiv:") and requested in evidence_urls)):
+            raise ValueError("论文来源与请求的链接或版本不一致。")
+        entry.update(title=paper["title"], url=paper["url"])
+        if paper.get("source_version"):
+            entry["source_version"] = paper["source_version"]
+        if not entry["title"]:
+            raise ValueError("论文缺少可核验的标题。")
+        entry["items"] = [dict(item) for item in paper["items"] if item["kind"] in wanted]
+        if "formula" in wanted and not any(item["kind"] == "formula" for item in entry["items"]):
+            note = "未取得可核对的公式源码。可打开论文原页核对，扫描页公式需要数学 OCR。"
+            if not entry["items"]:
+                raise ValueError(note)
+            entry["notice"] = note
+        if not entry["items"]:
+            raise ValueError("论文中未取得该类型的可定位原文证据。")
+        for item in entry["items"]:
+            if item["kind"] == "formula" and not (
+                isinstance(item.get("latex"), str) and item["latex"].strip()
+            ):
+                raise ValueError("缺少可核对的公式源码，请查看原文。")
+            if (not all(isinstance(item.get(k), str) and item[k].strip()
+                        for k in ("label", "value", "source", "quote", "source_url"))
+                    or not _same_source(entry["url"], item["source_url"], evidence_urls)
+                    or (item.get("public_source_url") and
+                        not _same_source(entry["url"], item["public_source_url"], evidence_urls))):
+                raise ValueError("提取项缺少本篇论文的原文、数值或定位链接。")
+        return paper
 
 
 def prepare(table, urls, kinds=None):
@@ -160,14 +204,17 @@ def prepare(table, urls, kinds=None):
 
     if not urls or len(urls) > MAX_PAPERS:
         raise ValueError(f"请指定 1 至 {MAX_PAPERS} 篇论文。")
-    wanted = {"metric", "figure", "table"} if kinds is None else set(kinds)
-    if not wanted or not wanted <= _KIND_NAMES.keys():
+    if isinstance(kinds, dict) and set(kinds) != set(urls):
+        raise ValueError("请为每篇论文指定需要预览的证据类型。")
+    scopes = kinds if isinstance(kinds, dict) else dict.fromkeys(urls, ("metric", "figure", "table") if kinds is None else kinds)
+    if any(not isinstance(scope, (tuple, list, set, frozenset)) or not scope or
+           not set(scope) <= _KIND_NAMES.keys() for scope in scopes.values()):
         raise ValueError("请指定关键数据、图、表或公式。")
     tool = getattr(table, "tool_name", None)
     with step("读取回填目标字段和现有记录", tool=tool):
         schema, rows = table.schema(), table.rows()
-    entries, drafts, seen, prepared_keys = [], [], set(), set()
-    for ref in urls:
+    entries, jobs, seen = [], [], set()
+    for idx, ref in enumerate(urls):
         entry = {"url": ref, "title": ref, "items": [], "status": "skipped"}
         entries.append(entry)
         try:
@@ -176,39 +223,43 @@ def prepare(table, urls, kinds=None):
             if key in seen:
                 raise ValueError("本批次中已出现同一篇论文。")
             seen.add(key)
-            with step(f"提取第 {len(entries)} 篇论文的原文证据", tool="论文解析"):
-                paper = (extract_evidence(requested, include_formulas=True) if "formula" in wanted
-                         else extract_evidence(requested))
-                evidence_urls = paper.get("evidence_urls", ())
-                # CVF 等出版页面可能解析成 DOI。仅接受解析器为该版本核实的原始入口。
-                if not (_same_source(requested, paper["url"]) or
-                        (not key.startswith("arxiv:") and requested in evidence_urls)):
-                    raise ValueError("论文来源与请求的链接或版本不一致。")
-                entry.update(title=paper["title"], url=paper["url"])
-                if paper.get("source_version"):
-                    entry["source_version"] = paper["source_version"]
-                if not entry["title"]:
-                    raise ValueError("论文缺少可核验的标题。")
-                entry["items"] = [dict(item) for item in paper["items"] if item["kind"] in wanted]
-                if "formula" in wanted and not any(item["kind"] == "formula" for item in entry["items"]):
-                    note = "未取得可核对的公式源码。可打开论文原页核对，扫描页公式需要数学 OCR。"
-                    if not entry["items"]:
-                        raise ValueError(note)
-                    entry["notice"] = note
-                if not entry["items"]:
-                    raise ValueError("论文中未取得该类型的可定位原文证据。")
-                for item in entry["items"]:
-                    if item["kind"] == "formula" and not (
-                        isinstance(item.get("latex"), str) and item["latex"].strip()
-                    ):
-                        raise ValueError("缺少可核对的公式源码，请查看原文。")
-                    if (not all(isinstance(item.get(k), str) and item[k].strip()
-                                for k in ("label", "value", "source", "quote", "source_url"))
-                            or not _same_source(entry["url"], item["source_url"], evidence_urls)
-                            or (item.get("public_source_url") and
-                                not _same_source(entry["url"], item["public_source_url"], evidence_urls))):
-                        raise ValueError("提取项缺少本篇论文的原文、数值或定位链接。")
-            with step(f"核对第 {len(entries)} 篇论文的目标行与列", tool=tool), table._lock:
+            jobs.append((idx, idx + 1, requested, key, scopes[ref]))
+        except (ValueError, TableError, OSError) as error:
+            entry["error"] = str(error)
+
+    extracted = {}
+
+    def _run(job):
+        idx, number, requested, key, wanted = job
+        try:
+            return idx, _extract_one(number, entries[idx], requested, key, wanted, extract_evidence), None
+        except (ValueError, TableError, OSError) as error:
+            return idx, None, error
+
+    if len(jobs) == 1:
+        idx, paper, error = _run(jobs[0])
+        extracted[idx] = (paper, error)
+    elif len(jobs) > 1:
+        with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as pool:
+            futures = [pool.submit(contextvars.copy_context().run, _run, job) for job in jobs]
+            for future in futures:
+                idx, paper, error = future.result()
+                extracted[idx] = (paper, error)
+
+    drafts, prepared_keys = [], set()
+    job_by_idx = {job[0]: job for job in jobs}
+    for idx, entry in enumerate(entries):
+        if "error" in entry:
+            drafts.append(None)
+            continue
+        _, number, requested, _, _ = job_by_idx[idx]
+        paper, error = extracted[idx]
+        if error is not None:
+            entry["error"] = str(error)
+            drafts.append(None)
+            continue
+        try:
+            with step(f"核对第 {number} 篇论文的目标行与列", tool=tool), table._lock:
                 aliases = list(dict.fromkeys([requested, entry["url"], *paper.get("aliases", [])]))
                 keys = {_paper_key(address) for address in aliases}
                 if prepared_keys & keys:
@@ -253,40 +304,75 @@ def _check_target(table, entry, draft):
             raise ValueError("同一论文仍有内容不同的待核验新增请求，请先核对原回执。")
 
 
-def _selected_drafts(plan, selection):
-    if selection is None:
+def _parse_overrides(raw, item_count, draft):
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("目标列设置与原预览不一致，请重新核对预览。")
+    if raw and draft is None:
+        raise ValueError("目标列设置与原预览不一致，请重新核对预览。")
+    allowed = set(draft.get("writable_columns") or ()) if draft else set()
+    parsed = {}
+    for key, col_name in raw.items():
+        if type(key) is int:
+            idx = key
+        elif isinstance(key, str) and key.isdigit():
+            idx = int(key)
+        else:
+            raise ValueError("目标列设置与原预览不一致，请重新核对预览。")
+        if not 0 <= idx < item_count or idx in parsed:
+            raise ValueError("目标列设置与原预览不一致，请重新核对预览。")
+        if not isinstance(col_name, str) or col_name not in allowed:
+            raise ValueError(f"目标列「{col_name}」不可用于写入提取结果，请重新核对预览。")
+        parsed[idx] = col_name
+    return parsed
+
+
+def _selected_drafts(plan, selection, field_overrides=None):
+    if selection is None and field_overrides is None:
         return plan["drafts"]
-    if not isinstance(selection, list) or len(selection) != len(plan["entries"]):
+    entries, drafts = plan["entries"], plan["drafts"]
+    if selection is not None and (not isinstance(selection, list) or len(selection) != len(entries)):
         raise ValueError("勾选范围与本批论文不一致，请重新核对预览。")
+    if field_overrides is not None and (not isinstance(field_overrides, list) or len(field_overrides) != len(entries)):
+        raise ValueError("目标列设置与本批论文不一致，请重新核对预览。")
     selected = []
-    for indices, entry, draft in zip(selection, plan["entries"], plan["drafts"]):
+    for p_idx, (entry, draft) in enumerate(zip(entries, drafts)):
         items = entry["items"]
-        if (not isinstance(indices, list) or len(indices) > len(items)
-                or any(type(i) is not int or not 0 <= i < len(items) for i in indices)
-                or len(set(indices)) != len(indices) or (indices and draft is None)):
-            raise ValueError("勾选项与原预览不一致，请重新核对预览。")
-        if not indices:
+        if selection is None:
+            indices = list(range(len(items))) if draft is not None else []
+        else:
+            indices = selection[p_idx]
+            if (not isinstance(indices, list) or len(indices) > len(items)
+                    or any(type(i) is not int or not 0 <= i < len(items) for i in indices)
+                    or len(set(indices)) != len(indices) or (indices and draft is None)):
+                raise ValueError("勾选项与原预览不一致，请重新核对预览。")
+        overrides = _parse_overrides(field_overrides[p_idx] if field_overrides is not None else None, len(items), draft)
+        if not indices or draft is None:
             selected.append(None)
             continue
-        before = draft["before"]
+        all_before = draft.get("all_before", draft["before"])
+        all_schema = draft.get("all_schema", draft["schema"])
+        chosen_items = [{**items[i], "field": overrides.get(i, items[i]["field"])} for i in sorted(indices)]
         identifiers = ((draft["link"], draft["target_url"]), (draft["title_col"], entry["title"]))
-        values, modes = _field_values([items[i] for i in sorted(indices)], before, identifiers)
+        values, modes = _field_values(chosen_items, all_before, identifiers)
+        _check_fields(all_schema, values)
         selected.append({**draft, "values": values,
-                         "before": {name: before[name] for name in values},
-                         "schema": [f for f in draft["schema"] if f["name"] in values],
+                         "before": {name: all_before.get(name, "") for name in values},
+                         "schema": [f for f in all_schema if f["name"] in values],
                          "patch": {name: value for name, value in values.items() if modes[name] != "unchanged"}})
     if not any(selected):
         raise ValueError("请至少勾选一项证据，或取消本批回填。")
     return selected
 
 
-def commit(table, plan, selection=None):
+def commit(table, plan, selection=None, field_overrides=None):
     """使用已确认的服务端快照逐篇提交，同一计划的重复确认返回原回执。"""
     tool = getattr(table, "tool_name", None)
     with table._lock:
         if "result" in plan:
             return plan["result"]
-        drafts = _selected_drafts(plan, selection)
+        drafts = _selected_drafts(plan, selection, field_overrides=field_overrides)
         results = []
         for number, (entry, draft) in enumerate(zip(plan["entries"], drafts), 1):
             result = {"title": entry["title"], "url": entry["url"]}

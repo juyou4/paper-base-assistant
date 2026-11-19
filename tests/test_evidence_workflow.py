@@ -284,3 +284,68 @@ class EvidenceWorkflowTests(unittest.TestCase):
             result = commit(self.table, plan)
         self.assertEqual(result["evidence_results"][0]["status"], "unverified")
         self.assertIn("0/1", result["verification"])
+
+    def test_concurrent_batch_extraction_preserves_order_and_context(self):
+        import threading
+        import activity
+
+        barrier = threading.Barrier(2, timeout=3)
+
+        def parallel_extract(url):
+            barrier.wait()
+            return extracted(url)
+
+        self.extract.side_effect = parallel_extract
+        run = activity.Run("req-concurrent")
+        with run.recording():
+            plan, reply = prepare(self.table, [LINK, OTHER], kinds=["metric"])
+        self.assertEqual(plan["ready"], 2)
+        self.assertEqual([p["url"] for p in reply["evidence_preview"]], [LINK, OTHER])
+        labels = [e["label"] for e in run.snapshot()["events"]]
+        self.assertIn("提取第 1 篇论文的原文证据", labels)
+        self.assertIn("提取第 2 篇论文的原文证据", labels)
+
+    def test_field_overrides_route_to_custom_column_and_guard_drift(self):
+        self.table.add_field("实验结果", "text")
+        self.table.upsert(LINK, {"论文链接": LINK, "实验结果": "已有记录"}, "seed")
+        plan, reply = prepare(self.table, [LINK, OTHER], kinds=["metric"])
+        preview = reply["evidence_preview"]
+        self.assertIn("实验结果", preview[0]["target_columns"])
+        self.assertNotIn("论文链接", preview[0]["target_columns"])
+        self.assertNotIn("论文标题", preview[0]["target_columns"])
+
+        for bad in ([[{"0": "实验结果"}]], [{"0": "论文链接"}, None], [{"0": "论文标题"}, None],
+                    [{"0": "不存在列"}, None], [{"99": "实验结果"}, None]):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                commit(self.table, plan, selection=[[0], [0]], field_overrides=bad)
+
+        result = commit(self.table, plan, selection=[[0], [1]],
+                        field_overrides=[{"0": "实验结果"}, {"1": "研究笔记"}])
+        self.assertEqual([r["status"] for r in result["evidence_results"]], ["verified", "verified"])
+        by_url = {r["fields"]["论文链接"]: r["fields"] for r in self.table.rows()}
+        self.assertIn("已有记录", by_url[LINK]["实验结果"])
+        self.assertIn("44.1", by_url[LINK]["实验结果"])
+        self.assertNotIn("阅读笔记", by_url[LINK])
+        self.assertIn("45.5", by_url[OTHER]["研究笔记"])
+
+        # 覆盖后的目标列同样受并发漂移保护。
+        plan2, _ = prepare(self.table, [LINK], kinds=["metric"])
+        self.table.upsert(LINK, {"实验结果": "他人刚改动"}, "drift")
+        failed = commit(self.table, plan2, selection=[[1]], field_overrides=[{"1": "实验结果"}])
+        self.assertEqual(failed["evidence_results"][0]["status"], "failed")
+        link_row = next(r for r in self.table.rows() if r["fields"].get("论文链接") == LINK)
+        self.assertEqual(link_row["fields"]["实验结果"], "他人刚改动")
+
+    def test_workflow_confirm_supports_evidence_fields(self):
+        from workflow import Conversation
+
+        self.table.add_field("自定义数据列", "text")
+        chat = Conversation(self.table, ".", "阅读清单")
+        preview_reply = chat.respond(f"提取关键数据 {LINK}")
+        pid = preview_reply["pending_id"]
+        with self.assertRaises(ValueError):
+            chat.respond("取消回填 " + pid, pending_id=pid, evidence_fields=[{"0": "自定义数据列"}])
+        confirmed = chat.respond("确认回填 " + pid, pending_id=pid,
+                                 evidence_selection=[[0]], evidence_fields=[{"0": "自定义数据列"}])
+        self.assertEqual(confirmed["evidence_results"][0]["status"], "verified")
+        self.assertIn("44.1", self.table.rows()[0]["fields"]["自定义数据列"])

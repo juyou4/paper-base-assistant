@@ -200,7 +200,7 @@ def _scalar_items(table, all_rows=None, title=""):
                 label = f"{row_name} · {header}"
                 result.append(_item("metric", label, value, table["source"], table["source_url"],
                                     f"{row_name} | {header} | {value}"))
-            if len(result) >= 4:
+            if len(result) >= 6:
                 return result
     return result
 
@@ -259,8 +259,8 @@ def _article_evidence(html, url, preferred_table=None, *, include_formulas=False
     # 有标量的内容表优先；留出图与表各自的展示空间。
     for _, _, table, metrics in tables[:2]:
         items.append(table)
-        items.extend(metrics[:2])
-    items.extend(figures[:2])
+        items.extend(metrics[:4])
+    items.extend(figures[:3])
     if include_formulas:
         reader = FormulaReader(url)
         reader.feed(html)
@@ -303,7 +303,7 @@ def _snapshot(version, *, include_formulas=False):
     table = _table_item(table_label, caption, origin + table_label, base + "#" + table_anchor, headers, rows)
     figure = _item("figure", "Figure 1", fig_caption, origin + "Figure 1", base + "#" + figure_anchor,
                    fig_caption, image_url=base + "/" + image)
-    items = [table, *_scalar_items(table)[:3], figure]
+    items = [table, *_scalar_items(table)[:4], figure]
     if include_formulas:
         if version == "1706.03762v7":
             label, anchor = "公式 (1)", "S3.E1"
@@ -330,7 +330,7 @@ def _pdf_items(data, pdf_url):
                     items.append(_item(kind, label, caption[3], source + " · " + label, link, caption[0]))
         for paragraph in re.split(r"\n\s*\n", content):
             for sentence in _result_sentences(paragraph):
-                if sum(i["kind"] == "metric" for i in items) < 3:
+                if sum(i["kind"] == "metric" for i in items) < 4:
                     items.append(_item("metric", "原文报告的结果", sentence, source, link, sentence))
     return items
 
@@ -351,7 +351,7 @@ def _pdf_grid(cells, label, caption, source, url, title):
     clear = (all(headers[1:]) and all(cell is not None for row in cells for cell in row)
              and all(row[0] and not NUMBER.fullmatch(row[0]) for row in data)
              and any(NUMBER.fullmatch(value) for value in data[0][1:]))
-    return [item, *(_scalar_items(item, data, title)[:2] if clear else [])]
+    return [item, *(_scalar_items(item, data, title)[:4] if clear else [])]
 
 
 def _nearby_caption(page, box):

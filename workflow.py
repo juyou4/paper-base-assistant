@@ -3,7 +3,7 @@
 import re
 import threading
 import uuid
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import papers
 import model_support
@@ -11,6 +11,8 @@ import source_library
 from activity import History
 from activity import step
 from dialog_choices import resolve_choice
+from paper_selection import paper_positions, separate_paper_clauses, without_positions
+import paper_search_dialog
 from preflight import verify_write
 from table_store import RecordNotFound, TableError, _identity
 
@@ -23,12 +25,19 @@ ROLES = {
     "note": ("阅读笔记", "研究笔记", "笔记", "备注", "note"),
 }
 LABEL = {"url": "论文链接", "title": "论文标题", "abstract": "摘要", "method": "方法", "note": "笔记"}
-STORE = r"存|填|写|放|记入|记录|收录|收下|收着|入库|入表|录入|添加|加到|加入|加进|补|登记|导入|保存|收进|更新|同步|收藏"
-DOI_PATTERN = r"(?<![a-zA-Z0-9.])10\.\d{4,9}/[A-Z0-9._;()/:-]+"
+STORE = r"存|填|写|放|记入|记在|记到|记录|收录|收下|收着|入库|入表|录入|添加|加到|加入|加进|补|登记|导入|保存|收进|更新|同步|收藏"
+DOI_START = r"10\.\d{4,9}/"
+# 分号也可以是 DOI 正文的一部分；只在后面紧跟另一个标识时作为分隔符。
+NEXT_REF = rf"https?://|;(?=(?:doi[:：])?{DOI_START}|arxiv[:：])"
+DOI_PATTERN = rf"(?<![a-zA-Z0-9.]){DOI_START}(?:(?!{NEXT_REF})[A-Z0-9._;()/:-])+"
 REFERENCE = re.compile(rf"https?://|arxiv\s*[:：]|(?<![\da-z])\d{{4}}\.\d{{4,5}}(?!\d)|{DOI_PATTERN}", re.I)
+# URL 参数可以包含完整网址（如 ?redirect=https://…），其他相邻的协议头开始下一条。
+URL_CHAR = r"""[^\s<>"'`，。；、！？：（）【】「」『』《》“”‘’|｜,\u200b\ufeff\u4e00-\u9fff]"""
+PASTED_URL = rf"https?://(?:=https?://|(?!{NEXT_REF}){URL_CHAR})+"
+MARKDOWN_LINK = r"\[[^\[\]\r\n]*\]\((?P<markdown>https?://(?:[^\s()]|\([^\s()]*\))+)\)"
 EVIDENCE_REFERENCES = re.compile(
-    rf"""https?://[^\s<>"'`，。；、！？（）【】,\u4e00-\u9fff]+|{DOI_PATTERN}|(?<![\w.]){papers.ARXIV_ID}(?![a-zA-Z0-9.])""",
-    re.I | re.ASCII,
+    rf"{MARKDOWN_LINK}|{PASTED_URL}|{DOI_PATTERN}|(?<![a-zA-Z0-9_.]){papers.ARXIV_ID}(?![a-zA-Z0-9.])",
+    re.I,
 )
 EVIDENCE_TERMS = {
     "metric": re.compile(r"指标|数据(?!表|库|集|源)|数值|数字|得分|分数|成绩|跑分|"
@@ -36,7 +45,7 @@ EVIDENCE_TERMS = {
                          r"准确率|正确率|精度|召回率|提升了?多少|(?:多少|几)分|量化结果|关键结果|"
                          r"\b(?:metrics?|scores?|results?|accuracy|BLEU|F1)\b", re.I),
     "figure": re.compile(r"图表|图片|图像|插图|配图|原图|架构图|结构图|曲线|示意图|流程图|"
-                         r"图\s*\d+|(?:些|张|看|的|和|与|跟|及|、|只要|只看|摘出|提取|只留)图|图(?=[和跟与及、/表，。！？\s]|$)|\bfig(?:ures?)?\b", re.I),
+                         r"图\s*\d+|(?:些|张|看|的|和|与|跟|及|、|只要|只看|摘出|提取|只留)图|图(?=[和跟与及、/表，。！？\s]|(?:先)?(?:不|去掉)|$)|\bfig(?:ures?)?\b", re.I),
     "table": re.compile(r"图表|表格|结果表|实验表|对比表|数据表|原表|表\s*\d+|"
                         r"(?:哪些|几[张个]|的|只要|只看|提取|和|跟|与|及|、|/)表(?=[里中和与，。！？\s]|$)|\btables?\b", re.I),
     "formula": re.compile(r"公式|方程|数学表达式|损失函数|目标函数|概率表达式|计算式|"
@@ -52,11 +61,10 @@ PREVIEW_CUES = re.compile(r"预览|过目|核对|确认后|给我.{0,3}(?:看看
 PLAIN_SAVE = re.compile(r"收藏|收下|收着|收录|归档|入库|存进|存入|存起来|保存|入表|登记到|纳入|收进|"
                         r"(?:把|将).{0,12}(?:存|放|加)(?:下|起|进|入|到)|也记进去")
 NOTE_TEXT = re.compile(r"^(?P<head>.*?(?:记(?:上|下)?(?:一[句条]|个)?(?:阅读|研究)?笔记|"
-                       r"(?:补|加|添|写)(?:上|下)?(?:一[句条]|个)?(?:阅读|研究)?笔记|"
+                       r"(?:做|补|加|添|写)(?:上|下)?(?:一[句条]|个)?(?:阅读|研究)?笔记|"
                        r"记一[句条]|(?:给|帮|替).{0,30}?(?:阅读|研究)笔记(?:里)?(?:加|补|写)一[句条]))"
                        r"\s*[：:，,]\s*(?P<body>\S[\s\S]*)$")
-TITLE_SAVE = re.compile(r"^(?:请|帮我|麻烦|先|我想|我要|想要|\s)*(?:收藏|收录|保存|查找|搜索)(?:一下|这篇论文|论文)?\s*"
-                        r"(?:[《“\"]([^》”\"\n]{2,200})[》”\"]|([A-Za-z][^。\n]{4,200}))[。]?$", re.I)
+QUOTED_NOTE = re.compile(r"(?:把|将)\s*[「『“‘\"'](.+?)[」』”’\"']\s*(?:记录|填|写|放|存|记)")
 ORDINARY_CONTENT = re.compile(r"摘要|简介|方法|标题|题名|网址|链接|下载|原文PDF|阅读笔记|研究笔记")
 LINK_ONLY = re.compile(r"(?:请|帮我|那就|还是|仅|只|先|要|想)*(?:收藏|保存|收录|存|留)[一下个]*(?:这[篇些几两]?论文的?)?(?:论文)?链接(?:就好|就行|吧)?[。！!]?")
 NO_EXTRACTION = re.compile(r"(?:不要|不用|停止|取消|别|禁止)(?:再)?(?:.{0,8}?(?:提取|抽取|预览|整理|分析)|处理(?:论文|这|它))")
@@ -74,9 +82,13 @@ DECLINED_WRITE = re.compile(r"(?:不需要|不想|不打算|不用|不要|无需
 
 
 def _evidence_urls(message):
+    # 用户要求原样写入的笔记可以包含多个参考网址，这些不是待操作的论文。
+    literal = QUOTED_NOTE.search(message)
+    if literal:
+        message = message[:literal.start(1)] + " " + message[literal.end(1):]
     urls = []
     for match in EVIDENCE_REFERENCES.finditer(message):
-        value = match.group()
+        value = match["markdown"] or match.group()
         if re.fullmatch(DOI_PATTERN, value, re.I):
             value = "https://doi.org/" + value.rstrip(".,;:")
         arxiv, url = papers._find_target(value)
@@ -88,7 +100,7 @@ def _evidence_urls(message):
     return urls
 
 
-def _evidence_kinds(text):
+def _evidence_scope(text):
     # “放进飞书表格”是目的地；只有原文中的表格才是提取对象。
     content = re.sub(r"(?:飞书|多维|当前|这张|目标)(?:多维)?(?:数据)?表格?|(?:到|进|入)(?:对应的?)?表格?", "", text)
     wanted, excluded = set(), set()
@@ -96,13 +108,60 @@ def _evidence_kinds(text):
         if re.search(r"(?:先|暂时)?(?:不用|不要|不看)(?:了)?\s*$", clause):
             excluded.update(kind for kind, pattern in EVIDENCE_TERMS.items() if pattern.search(clause))
             continue
-        for phrase in re.split(r"(?=不要|不用|不看|别提取|不需要|不提取)", clause):
+        for phrase in re.split(r"(?=不要|不用|不看|别提取|不需要|不提取|去掉|排除|跳过)", clause):
             kinds = {kind for kind, pattern in EVIDENCE_TERMS.items() if pattern.search(phrase)}
-            if re.match(r"不要|不用|不看|别提取|不需要|不提取", phrase) or re.search(r"(?:不用|不要|不看)(?:了)?$", phrase):
+            if re.match(r"不要|不用|不看|别提取|不需要|不提取|去掉|排除|跳过", phrase) or re.search(r"(?:不用|不要|不看)(?:了)?$", phrase):
                 excluded.update(kinds)
             else:
                 wanted.update(kinds)
-    return [kind for kind in EVIDENCE_TERMS if kind in wanted - excluded]
+    return [kind for kind in EVIDENCE_TERMS if kind in wanted - excluded], excluded
+
+
+def _evidence_kinds(text):
+    return _evidence_scope(text)[0]
+
+
+def _kinds_by_paper(text, urls):
+    clauses = separate_paper_clauses(text)
+    if len(clauses) < 2:
+        return None
+    groups = [(paper_positions(clause, len(urls)), _evidence_kinds(clause)) for clause in clauses]
+    if not all(positions and kinds for positions, kinds in groups):
+        # “第一篇和第二篇都看图”共用句末范围；“第一篇看图，第二篇”仍缺少后者的范围。
+        return None if all(positions for positions, _ in groups) and not any(k for _, k in groups[:-1]) else {}
+    result = {}
+    for positions, kinds in groups:
+        for i in positions:
+            result[urls[i]] = list(dict.fromkeys(result.get(urls[i], []) + kinds))
+    return result
+
+
+INCOMPLETE_EVIDENCE_SCOPE = "请补全每篇要看的内容，例如“第一篇看图，第二篇看实验数据”。也可以为本批选择统一范围。"
+
+
+def _preview_positions(text, urls, entries=()):
+    positions = paper_positions(text, len(urls), exclude=True)
+    if len(urls) < 2 or positions == []:
+        return positions
+    if re.search(r"前者|后者", text):
+        if len(urls) != 2 or re.search(r"不|别|除了|还是|或者", text) or ("前者" in text and "后者" in text):
+            return []
+        return [int("后者" in text)]
+    if not re.search(r"(?:这|那)(?:一)?篇", text):
+        return positions
+    names = re.findall(r"(?:《([^》]+)》|「([^」]+)」|([A-Za-z][A-Za-z0-9._-]*))\s*(?:的)?[这那](?:一)?篇", text)
+    if len(names) != 1 or re.search(r"不要|不看|跳过|排除|除了", text):
+        return []
+    title, label, word = names[0]
+    query = (title or label or word).casefold()
+    sites = {"ieee": "ieeexplore.ieee.org", "acl": "aclanthology.org", "arxiv": "arxiv.org",
+             "cvf": "openaccess.thecvf.com", "openreview": "openreview.net"}
+    matches = []
+    for i, url in enumerate(urls):
+        name = entries[i].get("title", "").casefold() if i < len(entries) else ""
+        if (word and query in sites and urlsplit(url).hostname == sites[query]) or query in name:
+            matches.append(i)
+    return matches if len(matches) == 1 and positions in (None, matches) else []
 
 
 def _clean(value):
@@ -114,10 +173,13 @@ def _normalized(value):
 
 
 def _destination(message):
-    hit = re.search(r"(?:写进|写入|填到|填入|填进|补进|补到|补入|放到|放进|记到|记入|存到|存进|保存到)[\s「“\"]*([^，。？！、\n]+?)\s*$", message)
+    hit = re.search(r"(?:写进|写入|填到|填入|填进|补进|补到|补入|放到|放进|记到|记入|记在|存到|存进|保存到)\s*([^，。？！、\n]+?)\s*$", message)
     if not hit:
         return ""
-    value = re.sub(r"(?:这|那|一)?[个一]?栏(?:里|中)?$|(?:这|那|一)?列(?:里|中)?$|字段(?:里|中)?$", "", _clean(hit[1]))
+    quoted = re.fullmatch(r'[「『“"]([^」』”"]+)[」』”"](?:这(?:一)?[栏列]|字段)?[里中内]?', hit[1].strip())
+    if quoted:
+        return quoted[1].strip()
+    value = re.sub(r"(?:这|那|一)?[个一]?栏(?:里|中)?$|(?:这|那|一)?列(?:里|中)?$|字段(?:里|中)?$|(?<=笔记)[里中]$", "", _clean(hit[1]))
     return _clean(value)
 
 
@@ -136,10 +198,14 @@ def _fields(schema, kind, hint=""):
 
 
 def _parse(message, table_name):
-    # URL 中的 abstract、method、跟踪参数等不是自然语言指令。
+    from intent_model import DOWNLOAD, allows_download, allows_english
+    # 只把用户在链接和逐字笔记之外说的话当作操作要求。
+    literal = QUOTED_NOTE.search(message)
+    if literal:
+        message = message[:literal.start(1)] + "…" + message[literal.end(1):]
     message = EVIDENCE_REFERENCES.sub(" ", message)
-    download = bool(re.search(r"下载|保存.{0,3}PDF|取回.{0,3}原文", message, re.I))
-    explicit_write = bool(re.search(STORE, re.sub(r"保存.{0,3}PDF", "", message, flags=re.I)))
+    download = allows_download(message)
+    explicit_write = bool(re.search(STORE, DOWNLOAD.sub(" ", message)))
     if download and not explicit_write:
         return {"download": True, "slots": [], "english": False}
     if not explicit_write:
@@ -161,7 +227,6 @@ def _parse(message, table_name):
         parts.append("abstract")
     if re.search(r"方法|技术路线|模型架构|method", message, re.I):
         parts.append("method")
-    literal = re.search(r"(?:把|将)\s*[「『“‘\"'](.+?)[」』”’\"']\s*(?:记录|填|写|放|存|记)", message)
     if literal:
         parts = ["note"]
     if not literal and re.search(r"贡献|实验结果|数据集|指标|作者|年份|机构|结论|怎么搭|怎么做", message):
@@ -180,15 +245,20 @@ def _parse(message, table_name):
         hint = destination if len(parts) == 1 else ""
         slots.append({"kind": kind, "hint": hint, "optional": default_title and kind == "title"})
     return {"download": download, "slots": slots, "literal": literal[1] if literal else "",
-            "english": bool(re.search(r"英文|原文摘|原文方法|英文原文", message))}
+            "english": allows_english(message)}
 
 
 class Conversation:
-    def __init__(self, table, data_dir, table_name):
+    def __init__(self, table, data_dir, table_name, base_url="", base_name=""):
         self.table = table
         self.table_tool = getattr(table, "tool_name", None)
         self.data_dir = data_dir
         self.table_name = table_name
+        self.base_url = base_url or ""
+        self.base_name = base_name
+        self.initial_target = (table, table_name, self.base_name, self.base_url)
+        self.owned_bases = []
+        self.workspace_receipt = None
         self.last = None
         self.last_title = ""
         self.pending = None
@@ -199,6 +269,21 @@ class Conversation:
         self.selected_model = None
         self.activity = History()
         self.lock = threading.RLock()
+
+    def select_table(self, table, name, base_name, base_url):
+        self.table, self.table_name = table, name
+        self.base_name, self.base_url = base_name, base_url
+        self.table_tool = getattr(table, "tool_name", None)
+        self.last = self.last_title = self.pending = None
+        self.last_evidence_receipt = self.recent_evidence = None
+        self.recent_saved = []
+        self.collection_batch = []
+
+    def close(self):
+        with self.lock:
+            for table in self.owned_bases:
+                table.close()
+            self.owned_bases.clear()
 
     def _ask(self, plan, message, choices, stage):
         task = self.pending or {"id": uuid.uuid4().hex}
@@ -211,11 +296,22 @@ class Conversation:
             return self.table.schema()
 
     def _table_lookup(self, kind):
+        from admin_dialog import NamedLookup, TYPE_LABEL
+
+        if kind == "skip_query":
+            return "好的，本次跳过查询。"
         if kind == "clarify":
             return f"你想了解「{self.table_name}」的哪一部分？可以回复“看记录”“查看字段”或“一共有几条记录”。"
         schema = self._read_schema() if kind != "count" else []
+        if isinstance(kind, NamedLookup) and kind.kind == "column":
+            matches = [f for f in schema if kind.name in (f["name"], f["id"])]
+            if not matches:
+                matches = [f for f in schema if kind.name in f["name"]]
+            if not matches:
+                return f"「{self.table_name}」中没有找到「{kind.name}」字段。可以说“查看字段”核对列名。"
+            return "\n".join(f"字段「{f['name']}」的类型为{TYPE_LABEL.get(f['type'], f['type'])}，ID 为 {f['id']}。"
+                             for f in matches)
         if kind == "columns":
-            from admin_dialog import TYPE_LABEL
             details = "、".join(f"{f['name']}（{TYPE_LABEL.get(f['type'], f['type'])}）" for f in schema)
             return f"「{self.table_name}」有 {len(schema)} 个字段。\n{details}"
         with step("查询数据表的可见记录", tool=self.table_tool):
@@ -223,12 +319,34 @@ class Conversation:
         summary = f"「{self.table_name}」共有 {len(rows)} 条可见记录。"
         if kind == "count":
             return summary
-        identities = [f["name"] for role in ("title", "url") for f in _fields(schema, role)]
-        if kind == "paper_count":
+        titles = [f["name"] for f in _fields(schema, "title")]
+        links = [f["name"] for f in _fields(schema, "url")]
+        identities = titles + links
+        if isinstance(kind, NamedLookup) and kind.kind == "paper_title":
+            if not titles:
+                return "当前表缺少可识别的论文标题列，无法按题名核对。"
+            wanted = " ".join(kind.name.split()).casefold()
+            total = sum(any(" ".join(str(row["fields"].get(col, "")).split()).casefold() == wanted
+                            for col in titles) for row in rows)
+            if total:
+                return f"「{self.table_name}」找到 {total} 条题名为《{kind.name}》的可见记录。"
+            return f"「{self.table_name}」可见记录中未找到题名为《{kind.name}》的论文。"
+        if kind in ("paper_count", "paper_list"):
             if not identities:
                 return summary + "当前表缺少可识别的论文标题或链接字段，无法核对论文数量。"
-            total = sum(any(row["fields"].get(name) for name in identities) for row in rows)
-            return summary + f"其中 {total} 条填写了论文标题或链接。"
+            papers = [r["fields"] for r in rows if any(r["fields"].get(name) for name in identities)]
+            summary += f"其中 {len(papers)} 条填写了论文标题或链接。"
+            if kind == "paper_count" or not papers:
+                return summary
+            columns = "、".join(f["name"] for f in schema[:12]) + ("等" if len(schema) > 12 else "")
+            lines = [summary, f"当前字段：{columns}。"]
+            for i, fields in enumerate(papers[:20], 1):
+                title = next((fields[n] for n in titles if fields.get(n)), "")
+                url = next((fields[n] for n in links if fields.get(n)), "")
+                lines.append(f"{i}. " + " · ".join(str(value) for value in (title, url) if value))
+            if len(papers) > 20:
+                lines.append(f"这里显示前 20 条，共 {len(papers)} 条。")
+            return "\n".join(lines)
         names = [field["name"] for field in schema]
         columns = "、".join(names[:12]) + ("等" if len(names) > 12 else "")
         lines = [summary, f"{len(names)} 个字段：{columns}。"]
@@ -301,12 +419,16 @@ class Conversation:
 
     def _preview_evidence(self, urls, kinds):
         from evidence_workflow import prepare
+        if isinstance(kinds, dict):
+            if any(url not in kinds for url in urls):
+                return self._ask_evidence_scope(urls)
+            kinds = {url: kinds[url] for url in urls}
         plan, reply = prepare(self.table, urls, kinds=kinds)
         batch_id = uuid.uuid4().hex
         reply["evidence_preview"] = {"id": batch_id, "papers": reply["evidence_preview"]}
         reply.pop("choices", None)
         self.pending = None
-        self.recent_evidence = (list(urls), list(kinds))
+        self.recent_evidence = (list(urls), kinds.copy())
         if len(urls) == 1:
             self.last = urls[0]
             self.last_title = next((paper.get("title") for paper in reply["evidence_preview"]["papers"]
@@ -322,26 +444,26 @@ class Conversation:
         urls = candidates
         if urls is None:
             urls = self.recent_evidence[0] if self.recent_evidence else (self.recent_saved or ([self.last] if self.last else []))
-        ordinal = ORDINAL.search(message)
-        if ordinal:
-            if candidates is None and not self.recent_evidence and self.collection_batch:
-                urls = self.collection_batch
-            number = ordinal[1]
-            index = int(number) - 1 if number.isdigit() else "一二三四五六七八".index(number)
-            return urls[index:index + 1]
+        ordered = self.collection_batch if candidates is None and not self.recent_evidence and self.collection_batch else urls
+        positions = paper_positions(message, len(ordered))
+        if positions is not None:
+            return [ordered[index] for index in positions]
         if PREVIOUS_REF.search(message) or suggested:
             if len(urls) > 1 and re.search(r"上(?:一)?篇|[这那](?:一)?篇|它(?![们俩])", message):
                 return []
             return urls
         return []
 
-    def _ask_evidence_scope(self, urls):
+    def _ask_evidence_scope(self, urls, prompt=None):
         choices = list(SCOPE_CHOICES)
         if len(urls) == 1:
             choices.append("只保存链接")
         elif len(urls) > 1:
             choices.append("全部先收藏")
-        return self._ask({"urls": urls}, "要先核对哪些内容？我会把原文出处和对应的目标列一起列出来。",
+        if prompt:
+            self.pending = None
+            prompt += "\n" + "\n".join(f"{i}. {url}" for i, url in enumerate(urls, 1))
+        return self._ask({"urls": urls}, prompt or "要先核对哪些内容？我会把原文出处和对应的目标列一起列出来。",
                          [*choices, "取消"], "evidence_scope")
 
     def _start_evidence(self, urls, kinds):
@@ -350,11 +472,54 @@ class Conversation:
         return self._ask({"kinds": kinds}, "请发论文链接、DOI 或 arXiv 编号。多篇可以分行发送，也可以指定刚才那一批里的第几篇。",
                          [], "evidence_urls")
 
+    def _ask_evidence_papers(self, urls, kinds):
+        self.pending = None
+        choices = [f"第{i}篇" for i in range(1, len(urls) + 1)]
+        numbered = "\n".join(f"{i}. {url}" for i, url in enumerate(urls, 1))
+        return self._ask({"urls": urls, "kinds": kinds},
+                         f"当前批次有 {len(urls)} 篇。请按下面的顺序选论文，再核对新的回填预览。\n{numbered}",
+                         [*choices, "全部重新预览", "取消"], "evidence_papers")
+
+    def _revise_evidence(self, message, task):
+        text = EVIDENCE_REFERENCES.sub(" ", message)
+        if ADMIN_OR_LITERAL.search(text):
+            return task["reply"]
+        urls, previous = self.recent_evidence
+        explicit = _evidence_urls(message)
+        targets = explicit or urls
+        entries = task["reply"]["evidence_preview"]["papers"] if targets == urls else ()
+        positions = _preview_positions(text, targets, entries)
+        grouped = _kinds_by_paper(text, targets)
+        kinds, excluded = _evidence_scope(text)
+        changing = explicit or positions is not None or excluded or re.search(r"只|仅|改|换|重新|再看|另", text)
+        if not changing or not (explicit or kinds or positions is not None or excluded):
+            return task["reply"]
+        if positions == []:
+            return self._ask_evidence_papers(targets, kinds or previous)
+        if positions is not None:
+            targets = [targets[index] for index in positions]
+        if grouped == {}:
+            return self._ask_evidence_scope(targets, INCOMPLETE_EVIDENCE_SCOPE)
+        self.pending = None
+        if grouped:
+            return self._start_evidence(list(grouped), grouped)
+        if not kinds and isinstance(previous, dict):
+            scopes = {url: [k for k in previous.get(url, []) if k not in excluded] for url in targets}
+            scopes = {url: allowed for url, allowed in scopes.items() if allowed}
+            return self._start_evidence(list(scopes), scopes) if scopes else self._ask_evidence_scope(targets)
+        if not kinds:
+            kinds = [kind for kind in previous if kind not in excluded]
+        if not kinds:
+            return self._ask_evidence_scope(targets)
+        return self._start_evidence(targets, kinds)
+
     def _route_evidence(self, message):
         text = EVIDENCE_REFERENCES.sub(" ", message)
         if ADMIN_OR_LITERAL.search(text):
             return None
-        bare = bool(REFERENCE.search(message)) and not re.sub(r"arxiv\s*[:：]?|[\s、，,;；。]+", "", text, flags=re.I)
+        bare = bool(REFERENCE.search(message)) and bool(re.fullmatch(
+            r"(?:[\s、，,;；。:：|｜<>《》【】“”‘’（）()\[\].*\-•\u200b\ufeff]|(?:arxiv|doi)\s*[:：]|\d+[.)、])*",
+            text, re.I))
         kinds = _evidence_kinds(text)
         if (NO_EXTRACTION.search(text) and not kinds
                 or re.match(r"\s*(?:不要|不用|别|取消|停止|先不|不需要)", text)
@@ -373,6 +538,17 @@ class Conversation:
             if PLAIN_SAVE.search(text) and not PREVIEW_CUES.search(text):
                 return None
         urls = _evidence_urls(message)
+        if urls and kinds:
+            grouped = _kinds_by_paper(text, urls)
+            positions = _preview_positions(text, urls)
+            if positions == []:
+                return self._ask_evidence_papers(urls, kinds)
+            if grouped:
+                urls, kinds = list(grouped), grouped
+            elif positions is not None:
+                urls = [urls[index] for index in positions]
+            if grouped == {}:
+                return self._ask_evidence_scope(urls, INCOMPLETE_EVIDENCE_SCOPE)
         previous = False
         if not kinds and self.recent_evidence and REPEAT_SCOPE.search(text):
             kinds = self.recent_evidence[1]
@@ -616,31 +792,10 @@ class Conversation:
 
     def _collect_selection(self, text, urls, request_id):
         """明确的排序选择只处理相应链接，有筛选条件时保留原批次供用户选择。"""
-        order = r"第\s*([一二两三四五六七八九十\d]+)\s*篇"
-        ordinals = re.findall(order, text)
-        condition = re.sub(order + r"|最后一篇|(?:只|仅)(?:要作)?(?:保存|收藏|存|收录)?(?:论文)?链接", " ", text)
-        constrained = re.search(r"如果|只要|条件|符合|筛|除了?|排除|剩(?:下|余)|不要|别|不收|不存|不含|"
-                                r"优先|公开|订阅|全文|相关|最新|[前后]\s*[几\d一二两三四五六七八九十]|"
-                                r"(?:年|会议)(?:的|后|前)|或(?:者)?|(?:有|带|含|能|可).{0,12}的|"
-                                r"第\s*[一二三四五六七八九十\d]", condition)
-        if not ordinals and "最后一篇" not in text:
-            constrained = constrained or re.search(r"只|仅|某篇|其中一篇", condition)
-        if not constrained:
-            positions = []
-            for number in ordinals:
-                if number.isdecimal():
-                    index = int(number)
-                else:
-                    index = "一二三四五六七八".find(number.replace("两", "二")) + 1 if len(number) == 1 else 0
-                if not 1 <= index <= len(urls):
-                    constrained = True
-                    break
-                positions.append(index - 1)
-            if not constrained:
-                if "最后一篇" in text:
-                    positions.append(len(urls) - 1)
-                selected = [urls[i] for i in dict.fromkeys(positions)] if positions else urls
-                return self._collect_batch(selected, request_id)
+        from paper_selection import collection_positions
+        positions = collection_positions(text, len(urls), self.table_name)
+        if positions:
+            return self._collect_batch([urls[i] for i in positions], request_id)
         choices = [f"第{i}篇" for i in range(1, len(urls) + 1)]
         numbered = "\n".join(f"{n}. {url}" for n, url in enumerate(urls, 1))
         return self._ask({"urls": urls}, "要收藏哪些来源？请指定序号或选择全部。\n" + numbered,
@@ -676,9 +831,9 @@ class Conversation:
         return self._ask({"url": url}, f"你指的是《{title or url}》吗？要把它的什么内容写进「{self.table_name}」？",
                          ["保存论文链接", "填写摘要", "填写方法", "换一篇论文", "取消"], "ambiguous_intent")
 
-    def respond(self, message, pending_id=None, request_id=None, evidence_selection=None):
+    def respond(self, message, pending_id=None, request_id=None, evidence_selection=None, evidence_fields=None):
         with self.lock:
-            if evidence_selection is not None:
+            if evidence_selection is not None or evidence_fields is not None:
                 choice = EVIDENCE_DECISION.fullmatch(message)
                 if not pending_id or not choice or not choice[1].startswith("确认") or (choice[2] and choice[2] != pending_id):
                     raise ValueError("请在本批预览中选择提取项，并使用对应的确认按钮。")
@@ -687,9 +842,31 @@ class Conversation:
             if pending_id and self.pending and pending_id != self.pending["id"]:
                 raise ValueError("上一项确认已经结束，请使用当前预览。")
             literal_note = NOTE_TEXT.fullmatch(message.strip())
+            has_note_body = literal_note or QUOTED_NOTE.search(message)
+            if not has_note_body:
+                from workspace_actions import handle_workspace
+                workspace = handle_workspace(self, message, pending_id)
+                if workspace is not None:
+                    return workspace
+            if not getattr(self.table, "table_id", True):
+                return {"message": "请先创建一个多维表格文件，例如“新建多维表格「论文资料库」”。"}
+            from intent_guard import guard_paper_request
             from admin_dialog import infer_table_lookup, table_lookup_kind
-            if not literal_note and (self.pending or not pending_id) and (not self.pending or message not in self.pending.get("choices", ())):
-                lookup = table_lookup_kind(message, self.table_name) or infer_table_lookup(message, self.table_name)
+            can_query = not has_note_body and (self.pending or not pending_id) and (
+                not self.pending or message not in self.pending.get("choices", ()))
+            lookup = table_lookup_kind(message, self.table_name) if can_query else None
+            if (not has_note_body and not REFERENCE.search(message) and (self.pending or not pending_id)
+                    and (not lookup or (self.pending and self.pending["stage"] == "search_source"))):
+                from library_search import handle as search_library_or_catalog
+                result = search_library_or_catalog(self, message, pending_id)
+                if result is not None:
+                    return result
+            if not lookup:
+                guarded = guard_paper_request(self, message, pending_id, request_id)
+                if guarded is not None:
+                    return guarded
+            if can_query:
+                lookup = lookup or infer_table_lookup(message, self.table_name)
                 # 原有模型字段查询保留其规划、工具追踪；离线模式也能回答相同的口语提问。
                 from agent_router import is_candidate
                 model_fields = lookup == "columns" and not self.pending and is_candidate(message) and model_support.enabled()
@@ -725,10 +902,28 @@ class Conversation:
                     if not urls:
                         return self._ask(plan, task["message"], [], stage)
                     return self._preview_evidence(urls, _evidence_kinds(EVIDENCE_REFERENCES.sub(" ", message)) or plan["kinds"])
+                if stage == "evidence_papers":
+                    urls = plan["urls"]
+                    if message == "全部重新预览":
+                        return self._preview_evidence(urls, plan["kinds"])
+                    positions = paper_positions(message, len(urls), exclude=True)
+                    if not positions:
+                        return self._ask(plan, task["message"], task["choices"], stage)
+                    return self._preview_evidence([urls[i] for i in positions], plan["kinds"])
                 if stage == "evidence_scope":
                     text = EVIDENCE_REFERENCES.sub(" ", message)
-                    urls = _evidence_urls(message) or self._previous_evidence_urls(
+                    explicit = _evidence_urls(message)
+                    candidates = explicit or plan["urls"]
+                    grouped = _kinds_by_paper(text, candidates)
+                    positions = _preview_positions(text, candidates)
+                    if positions == [] and candidates:
+                        return self._ask_evidence_papers(candidates, _evidence_kinds(text) or list(EVIDENCE_TERMS))
+                    if grouped:
+                        return self._preview_evidence(list(grouped), grouped)
+                    urls = [candidates[i] for i in positions] if positions else explicit or self._previous_evidence_urls(
                         message, suggested=True, candidates=plan["urls"] or None)
+                    if grouped == {}:
+                        return self._ask_evidence_scope(urls, INCOMPLETE_EVIDENCE_SCOPE)
                     if re.fullmatch(r"(?:全部|全都|都)(?:先)?(?:收藏|收下|保存)(?:起来|下来|吧)?[。！!]?", text.strip()) and urls:
                         self.pending = None
                         return self._collect_batch(urls, request_id)
@@ -749,7 +944,9 @@ class Conversation:
                         return self._ask(plan, task["message"], task["choices"], stage)
                     if message == "全部收藏":
                         return self._collect_batch(plan["urls"], request_id)
-                    if re.fullmatch(r"第\s*[一二两三四五六七八1-8]\s*篇(?:[、，,和与\s]+第\s*[一二两三四五六七八1-8]\s*篇)*", message):
+                    if (paper_positions(message, len(plan["urls"])) and re.fullmatch(
+                            r"(?:我选|就选|选择|选|只(?:要|收藏)|收藏)?[、，,和与及\s]*(?:就好|吧)?[。！!]?",
+                            without_positions(message).strip())):
                         return self._collect_selection(message, plan["urls"], request_id)
                     return self._ask(plan, task["message"], task["choices"], stage)
                 if stage == "single_link":
@@ -763,42 +960,36 @@ class Conversation:
                 if stage == "evidence_confirm":
                     action = EVIDENCE_DECISION.fullmatch(message)
                     if not action:
-                        kinds = _evidence_kinds(EVIDENCE_REFERENCES.sub(" ", message))
-                        changing = REFERENCE.search(message) or re.search(r"只|改|换|重新|再看|另|不要|前一篇|第.+篇", message)
-                        if kinds and changing and not ADMIN_OR_LITERAL.search(message):
-                            urls = _evidence_urls(message) or self._previous_evidence_urls(message, suggested=True)
-                            # 修改范围即撤回旧批次确认；新提取生成独立编号。
-                            self.pending = None
-                            return self._start_evidence(urls, kinds)
-                        return task["reply"]
+                        return self._revise_evidence(message, task)
                     if (action[2] or pending_id) != task["id"]:
                         raise ValueError("请使用这批论文预览下方的确认或取消按钮。")
                     if action[1] == "取消回填":
                         self.pending = None
                         return {"message": "已取消本批回填。"}
                     from evidence_workflow import commit
-                    result = (commit(self.table, plan) if evidence_selection is None else
-                              commit(self.table, plan, selection=evidence_selection))
+                    if evidence_selection is None and evidence_fields is None:
+                        result = commit(self.table, plan)
+                    else:
+                        result = commit(self.table, plan, selection=evidence_selection, field_overrides=evidence_fields)
                     self.last_evidence_receipt = (task["id"], result)
                     self.pending = None
                     return result
                 if stage == "ambiguous_paper" or (stage == "ambiguous_intent" and REFERENCE.search(message)):
-                    if not REFERENCE.search(message):
-                        return self._ask({}, "请发你指的那篇论文链接、DOI 或 arXiv 编号。", [], "ambiguous_paper")
+                    urls = _evidence_urls(message)
+                    if len(urls) != 1:
+                        return self._ask({}, "请指定一篇论文，发送它的链接、DOI 或 arXiv 编号。", [], "ambiguous_paper")
                     with step("读取论文基本信息", tool="论文解析"):
-                        source = papers.resolve_paper(message, self.data_dir)
+                        source = papers.resolve_paper(urls[0], self.data_dir)
                     return self._clarify_intent(source["url"], source.get("title"))
                 if stage == "paper":
                     if self.last and re.fullmatch(r"(?:刚才|上一|之前|上面)(?:的)?(?:那|这)?(?:一)?篇(?:论文)?[。！]?", message):
                         return self._load(self.last, plan)
-                    if not REFERENCE.search(message):
-                        return self._ask(plan, task["message"], [], stage)
-                    return self._load(message, plan)
-                if stage == "title_choice":
-                    if message not in plan["candidates"] or pending_id != task["id"]:
-                        return self._ask(plan, task["message"], task["choices"], stage)
-                    self.pending = None
-                    return self._collect_batch([plan["candidates"][message]], request_id)
+                    urls = _evidence_urls(message)
+                    if len(urls) != 1:
+                        return self._ask(plan, "请指定一篇要处理的论文，发送它的链接、DOI 或 arXiv 编号。", [], stage)
+                    return self._load(urls[0], plan)
+                if stage in {"title_choice", "title_selected"}:
+                    return paper_search_dialog.followup(self, message, task, pending_id, request_id)
                 choice = resolve_choice(message, stage, task["choices"])
                 if choice not in task["choices"]:
                     return self._ask(plan, task["message"], task["choices"], stage)
@@ -874,18 +1065,8 @@ class Conversation:
                 return self._prepare_admin({"op": "columns"})
             if re.match(r"^(?:请问|我想知道|讲讲|告诉我)?\s*(?:如何|怎么才能|怎样|要怎么|能否介绍|怎么把|怎么将)", message):
                 return {"message": "可以先说“查看字段”或“查看角色「论文审阅人」的权限”。需要执行时，请直接指定目标和新值。此处仅说明用法。"}
-            if not REFERENCE.search(message) and (title_query := TITLE_SAVE.fullmatch(message.strip())):
-                with step("按题名查询书目候选", tool="Crossref"):
-                    matches = papers.search_titles(title_query[1] or title_query[2])
-                candidates = {}
-                for n, p in enumerate(matches, 1):
-                    details = " · ".join(str(value) for value in ((p.get("authors") or [""])[0], p.get("year")) if value)
-                    label = f"{n}. {p['title']}" + (f"（{details}）" if details else "")
-                    candidates[label] = p["url"]
-                if not candidates:
-                    return {"message": "未取得可核对的题录，请发 DOI、论文链接或补充题名。"}
-                return self._ask({"candidates": candidates}, "你指的是哪篇？选中后收藏到阅读清单。",
-                                 [*candidates, "取消"], "title_choice")
+            if not REFERENCE.search(message) and (query := paper_search_dialog.title_request(message)):
+                return paper_search_dialog.start(self, *query)
             if PLAIN_SAVE.search(wording) and not (DECLINED_WRITE.search(wording) or
                     re.search(r"[?？]|要不要|能否|可不可以|是否|删除|清空|建列|权限", wording)):
                 urls = _evidence_urls(message)
@@ -919,7 +1100,8 @@ class Conversation:
                 return self._prepare_admin({"op": "create", "name": name, "type": kind})
             if re.search(r"删除|清空|授权|改权限|改名|重命名", message):
                 return {"message": "请明确要管理的对象。例如“删除字段「临时备注」”或“查看角色「论文审阅人」的权限”。"}
-            if len(re.findall(r"https?://", message, re.I)) > 1:
+            urls = _evidence_urls(message)
+            if len(urls) > 1:
                 return {"message": "这条指令含有多个地址。请一次指定一篇论文。"}
             if (not REFERENCE.search(message) and re.search(r"那个|这个|刚才的|上面的|也(?:记|加|放|填|存)进去", message)
                     and re.search(r"记|存|填|写|放|加|录|改", message)
@@ -934,11 +1116,14 @@ class Conversation:
                 plan = interpret(message, self._read_schema(), self.table_name)
             else:
                 if model_support.agent_info()["enabled"]:
-                    from intent_model import review_plan
-                    review_plan(message, self.table_name, plan)
+                    from intent_model import FIELD_DIRECTION, review_plan
+                    columns = None
+                    if plan["slots"] and re.search(rf"{FIELD_DIRECTION}|在.{{1,40}}(?:记|写|填|补)", wording):
+                        columns = [field["name"] for field in self._read_schema()]
+                    review_plan(message, self.table_name, plan, columns=columns)
             plan["request_id"] = request_id or uuid.uuid4().hex
-            if REFERENCE.search(message):
-                return self._load(message, plan)
+            if urls:
+                return self._load(urls[0], plan)
             if self.last and re.search(r"刚才|上[述一]|这[一篇个项]|那[一篇个项]|它|再|顺便|补[充上一写一句]|接着", message):
                 return self._load(self.last, plan)
             return self._ask(plan, "要处理哪篇论文？请发论文链接、DOI 或 arXiv 编号。", [], "paper")

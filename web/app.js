@@ -13,12 +13,332 @@ const motionOk = () => !window.matchMedia("(prefers-reduced-motion: reduce)").ma
 const ICONS = {
   send: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14m-6-6 6 6-6 6"/></svg>',
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4.5 4.5L19 7"/></svg>',
+  checkSm: '<svg class="ico-check-draw" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>',
+  checkPlain: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4.5 4.5L19 7"/></svg>',
   alert: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4.5M12 16h.01"/></svg>',
   close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>',
   copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2.5"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>',
   link: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>',
+  arrowUpRight: '<svg class="ico-ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M9 7h8v8"/></svg>',
+  download: '<svg class="ico-dl" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 19h14"/></svg>',
+  chevronDown: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>',
+  chevronRight: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>',
+  statusRun: '<svg class="ico-spin-arc" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></svg>',
+  statusFail: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M15 9 9 15M9 9l6 6"/></svg>',
+  statusSkip: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 12h12"/></svg>',
   spinner8: '<svg class="thinking-spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="2.5" x2="12" y2="6" opacity="1"/><line x1="18.7" y1="5.3" x2="16.2" y2="7.8" opacity="0.85"/><line x1="21.5" y1="12" x2="18" y2="12" opacity="0.7"/><line x1="18.7" y1="18.7" x2="16.2" y2="16.2" opacity="0.55"/><line x1="12" y1="21.5" x2="12" y2="18" opacity="0.4"/><line x1="5.3" y1="18.7" x2="7.8" y2="16.2" opacity="0.28"/><line x1="2.5" y1="12" x2="6" y2="12" opacity="0.2"/><line x1="5.3" y1="5.3" x2="7.8" y2="7.8" opacity="0.14"/></svg>'
 };
+
+const customSelects = [];
+function closeAllCustomSelects(except = null) {
+  for (const inst of customSelects) {
+    if (inst !== except) inst.close(false);
+  }
+}
+
+function createCustomSelect(selectEl, opts = {}) {
+  if (!selectEl || selectEl._cselect) return selectEl?._cselect;
+  const {
+    variant = "pill",
+    placement = "bottom",
+    minWidth = 170,
+    maxHeight = 250,
+    matchTriggerWidth = false,
+    fullWidth = false
+  } = opts;
+
+  const wrapper = make("div", undefined, "cselect" + (fullWidth ? " cselect-full" : ""));
+  const trigger = make("button", undefined, "cselect-trigger cselect-" + variant);
+  trigger.type = "button";
+  trigger.setAttribute("aria-haspopup", "listbox");
+  trigger.setAttribute("aria-expanded", "false");
+  const labelAttr = selectEl.getAttribute("aria-label");
+  if (labelAttr) trigger.setAttribute("aria-label", labelAttr);
+
+  const labelSpan = make("span", "", "cselect-label");
+  const busySpin = make("span", undefined, "cselect-busy-spin");
+  busySpin.setAttribute("aria-hidden", "true");
+  const chev = make("span", undefined, "cselect-chevron");
+  chev.setAttribute("aria-hidden", "true");
+  chev.innerHTML = ICONS.chevronDown;
+  trigger.append(labelSpan, busySpin, chev);
+
+  selectEl.before(wrapper);
+  wrapper.append(trigger, selectEl);
+  selectEl.classList.add("sr-select");
+  selectEl.tabIndex = -1;
+  selectEl.setAttribute("aria-hidden", "true");
+
+  const menu = make("div", undefined, "cselect-menu");
+  menu.setAttribute("role", "listbox");
+  menu.inert = true;
+  menu.setAttribute("aria-hidden", "true");
+  const scrollBox = make("div", undefined, "cselect-scroll");
+  const glide = make("div", undefined, "cselect-glide");
+  glide.setAttribute("aria-hidden", "true");
+  scrollBox.append(glide);
+  menu.append(scrollBox);
+
+  let open = false;
+  let optionBtns = [];
+  let lastLabel = "";
+
+  function ensureMounted() {
+    const host = selectEl.closest("dialog") || document.body;
+    if (menu.parentElement !== host) host.append(menu);
+  }
+
+  function moveGlide(btn) {
+    if (!btn || btn.disabled) {
+      glide.classList.remove("visible");
+      return;
+    }
+    glide.style.height = btn.offsetHeight + "px";
+    glide.style.transform = `translate3d(0, ${btn.offsetTop}px, 0)`;
+    glide.classList.add("visible");
+  }
+
+  function positionMenu() {
+    ensureMounted();
+    const rect = trigger.getBoundingClientRect();
+    let width = matchTriggerWidth ? Math.max(rect.width, minWidth || 0) : Math.max(rect.width, minWidth);
+    width = Math.min(width, window.innerWidth - 24);
+    menu.style.width = width + "px";
+
+    const spaceAbove = rect.top - 14;
+    const spaceBelow = window.innerHeight - rect.bottom - 14;
+    let chosen = placement;
+    if (chosen === "top" && spaceAbove < 140 && spaceBelow > spaceAbove) chosen = "bottom";
+    else if (chosen === "bottom" && spaceBelow < 140 && spaceAbove > spaceBelow) chosen = "top";
+
+    const avail = chosen === "top" ? spaceAbove : spaceBelow;
+    scrollBox.style.maxHeight = Math.max(100, Math.min(maxHeight, avail - 10)) + "px";
+
+    const menuH = menu.offsetHeight;
+    const top = chosen === "top"
+      ? Math.max(10, rect.top - menuH - 6)
+      : Math.min(window.innerHeight - menuH - 10, rect.bottom + 6);
+    let left = (placement === "top" && !matchTriggerWidth) ? rect.right - width : rect.left;
+    left = Math.max(12, Math.min(left, window.innerWidth - width - 12));
+
+    menu.dataset.placement = chosen;
+    menu.style.left = left + "px";
+    menu.style.top = top + "px";
+  }
+
+  function syncOptions() {
+    const optsList = [...selectEl.options];
+    const sig = optsList.map(o => o.value + "\0" + o.textContent + "\0" + (o.disabled ? "1" : "0")).join("\n");
+    if (menu.dataset.sig !== sig) {
+      menu.dataset.sig = sig;
+      scrollBox.replaceChildren(glide);
+      optionBtns = optsList.map((opt, idx) => {
+        const btn = make("button", undefined, "cselect-option");
+        btn.type = "button";
+        btn.setAttribute("role", "option");
+        btn.dataset.index = String(idx);
+        btn.disabled = opt.disabled;
+        const txt = make("span", opt.textContent, "cselect-option-text");
+        const chk = make("span", undefined, "cselect-check");
+        chk.setAttribute("aria-hidden", "true");
+        chk.innerHTML = ICONS.checkPlain;
+        btn.append(txt, chk);
+        btn.addEventListener("pointerenter", () => moveGlide(btn));
+        btn.addEventListener("focus", () => moveGlide(btn));
+        btn.addEventListener("click", () => pick(idx));
+        scrollBox.append(btn);
+        return btn;
+      });
+    }
+    const selIdx = selectEl.selectedIndex;
+    optionBtns.forEach((btn, idx) => {
+      btn.setAttribute("aria-selected", String(idx === selIdx));
+    });
+  }
+
+  function sync(animateText = false) {
+    syncOptions();
+    const sel = selectEl.options[selectEl.selectedIndex];
+    const text = sel ? sel.textContent : "";
+    if (text !== lastLabel) {
+      if (animateText && lastLabel) swapInlineText(labelSpan, text);
+      else labelSpan.textContent = text;
+      lastLabel = text;
+    }
+    trigger.title = text;
+    wrapper.hidden = selectEl.hidden;
+    trigger.disabled = selectEl.disabled || !selectEl.options.length;
+    if ((trigger.disabled || wrapper.hidden) && open) close(false);
+  }
+
+  function setOpen(next, focusOpt = true) {
+    if (next && trigger.disabled) return;
+    if (open === next) return;
+    if (next) closeAllCustomSelects(inst);
+    open = next;
+    trigger.classList.toggle("is-open", open);
+    trigger.setAttribute("aria-expanded", String(open));
+    menu.inert = !open;
+    menu.setAttribute("aria-hidden", String(!open));
+    if (open) {
+      sync(false);
+      positionMenu();
+      menu.classList.add("is-open");
+      const active = optionBtns[Math.max(0, selectEl.selectedIndex)] || optionBtns[0];
+      if (active) {
+        active.scrollIntoView({ block: "nearest" });
+        requestAnimationFrame(() => moveGlide(active));
+        if (focusOpt) requestAnimationFrame(() => active.focus({ preventScroll: true }));
+      }
+    } else {
+      menu.classList.remove("is-open");
+      glide.classList.remove("visible");
+    }
+  }
+
+  function close(restoreFocus = false) {
+    const wasOpen = open;
+    setOpen(false, false);
+    if (wasOpen && restoreFocus && trigger.isConnected && !trigger.disabled) {
+      trigger.focus({ preventScroll: true });
+    }
+  }
+
+  function pick(idx) {
+    const changed = selectEl.selectedIndex !== idx;
+    selectEl.selectedIndex = idx;
+    sync(true);
+    close(true);
+    if (changed) selectEl.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  trigger.addEventListener("click", () => setOpen(!open, true));
+  trigger.addEventListener("keydown", e => {
+    if (["ArrowDown", "ArrowUp", "Enter", " "].includes(e.key)) {
+      e.preventDefault();
+      if (!open) setOpen(true, true);
+    }
+  });
+
+  menu.addEventListener("pointerleave", () => {
+    const focused = optionBtns.find(b => b === document.activeElement);
+    if (focused) moveGlide(focused);
+    else glide.classList.remove("visible");
+  });
+
+  menu.addEventListener("keydown", e => {
+    const enabled = optionBtns.filter(b => !b.disabled);
+    if (!enabled.length) return;
+    const cur = enabled.indexOf(document.activeElement);
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      enabled[(cur + 1) % enabled.length].focus();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      enabled[(cur - 1 + enabled.length) % enabled.length].focus();
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      enabled[0].focus();
+    } else if (e.key === "End") {
+      e.preventDefault();
+      enabled[enabled.length - 1].focus();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      close(true);
+    } else if (e.key === "Tab") {
+      close(false);
+    }
+  });
+
+  const dialog = selectEl.closest("dialog");
+  const onDialogClose = () => close(false);
+  if (dialog) dialog.addEventListener("close", onDialogClose);
+
+  function destroy() {
+    close(false);
+    if (dialog) dialog.removeEventListener("close", onDialogClose);
+    menu.remove();
+    const idx = customSelects.indexOf(inst);
+    if (idx >= 0) customSelects.splice(idx, 1);
+    delete selectEl._cselect;
+  }
+
+  const inst = {
+    sync,
+    close,
+    destroy,
+    trigger,
+    containsTarget: t => wrapper.contains(t) || menu.contains(t),
+    isOpen: () => open
+  };
+  customSelects.push(inst);
+  selectEl._cselect = inst;
+  sync(false);
+  return inst;
+}
+
+document.addEventListener("pointerdown", e => {
+  for (const inst of customSelects) {
+    if (inst.isOpen() && !inst.containsTarget(e.target)) inst.close(false);
+  }
+});
+window.addEventListener("resize", () => closeAllCustomSelects());
+window.addEventListener("scroll", e => {
+  for (const inst of customSelects) {
+    if (inst.isOpen() && !inst.containsTarget(e.target)) inst.close(false);
+  }
+}, true);
+
+function animateDetailsToggle(detailsEl, bodySelector) {
+  const summary = detailsEl.querySelector("summary");
+  const body = detailsEl.querySelector(bodySelector);
+  if (!summary || !body) return;
+  let anim = null;
+  summary.addEventListener("click", e => {
+    if (!motionOk()) return;
+    e.preventDefault();
+    if (anim) {
+      anim.cancel();
+      anim = null;
+    }
+    if (detailsEl.open) {
+      const h = body.scrollHeight;
+      anim = body.animate(
+        [
+          { height: h + "px", opacity: 1 },
+          { height: "0px", opacity: 0 }
+        ],
+        { duration: 210, easing: "cubic-bezier(0.22, 1, 0.36, 1)" }
+      );
+      anim.finished.then(() => {
+        detailsEl.open = false;
+        anim = null;
+      }, () => { anim = null; });
+    } else {
+      detailsEl.open = true;
+      const h = body.scrollHeight;
+      anim = body.animate(
+        [
+          { height: "0px", opacity: 0 },
+          { height: h + "px", opacity: 1 }
+        ],
+        { duration: 260, easing: "cubic-bezier(0.22, 1, 0.36, 1)" }
+      );
+      anim.finished.then(() => { anim = null; }, () => { anim = null; });
+    }
+  });
+}
+
+function makeSummaryWithChevron(labelText) {
+  const sum = make("summary");
+  sum.append(make("span", labelText));
+  const chev = make("span", undefined, "disclosure-chevron");
+  chev.setAttribute("aria-hidden", "true");
+  chev.innerHTML = ICONS.chevronDown;
+  sum.append(chev);
+  return sum;
+}
 
 let state = { fields: [], rows: [], sample: {}, capabilities: {} };
 let busy = false;
@@ -28,6 +348,8 @@ let refreshingState = false;
 let pendingId = null;
 let reviewId = null;
 const reviewSelections = new Map();
+const reviewFieldOverrides = new Map();
+const reviewColSelects = [];
 let selectedId = null;
 let viewMode = "cards";
 let latestStateRequest = 0;
@@ -52,6 +374,16 @@ function link(label, url, className) {
   a.href = url;
   a.target = "_blank";
   a.rel = "noopener noreferrer";
+  return a;
+}
+
+function iconLink(label, url, className, iconSvg = ICONS.arrowUpRight) {
+  const a = link(undefined, url, className);
+  const span = make("span", label);
+  const wrap = make("span", undefined, "ico-wrap");
+  wrap.setAttribute("aria-hidden", "true");
+  wrap.innerHTML = iconSvg;
+  a.append(span, wrap);
   return a;
 }
 
@@ -90,7 +422,7 @@ function renderConnectionDetails() {
   status.hidden = !ready || typeof enabled !== "boolean";
   if (!status.hidden) {
     const name = modelName(agent);
-    status.textContent = enabled ? "已配置模型" + (name ? " · " + name : "") : "模型未配置";
+    status.textContent = enabled ? (name || "模型已就绪") : "规则模式";
   }
   const select = byId("model-select");
   const models = Array.isArray(agent?.models)
@@ -100,6 +432,7 @@ function renderConnectionDetails() {
     select.replaceChildren(...models.map(model => new Option(model, model)));
   }
   select.value = agent?.model || "";
+  select._cselect?.sync();
   const target = ready && state.mode === "feishu" ? feishuTableLink(state.feishu_url) : null;
   const external = byId("feishu-link");
   external.hidden = !target;
@@ -110,13 +443,24 @@ function renderConnectionDetails() {
 function appendModelTrace(article, agent) {
   const steps = Array.isArray(agent?.steps)
     ? agent.steps.filter(step => typeof step === "string" && step.trim()) : [];
+  const trace = make("div", undefined, "model-trace");
   if (!steps.length) {
-    article.append(make("p", "本次回复 · 未调用模型", "model-trace"));
+    trace.append(make("span", "规则处理", "model-trace-badge"));
+    article.append(trace);
     return;
   }
-  const trace = make("div", undefined, "model-trace");
-  trace.append(make("p", "本次使用模型 · " + (modelName(agent) || "已调用")));
-  trace.append(make("p", steps.join(" → "), "model-steps"));
+  trace.append(make("span", modelName(agent) || "模型推理", "model-trace-badge"));
+  const row = make("div", undefined, "model-steps-row");
+  steps.forEach((step, idx) => {
+    if (idx > 0) {
+      const sep = make("span", undefined, "model-step-sep");
+      sep.setAttribute("aria-hidden", "true");
+      sep.innerHTML = ICONS.chevronRight;
+      row.append(sep);
+    }
+    row.append(make("span", step, "model-step-chip"));
+  });
+  trace.append(row);
   article.append(trace);
 }
 
@@ -151,7 +495,7 @@ async function copyClipboard(text) {
 async function copyWithFeedback(button, text, idleLabel = "复制") {
   const ok = await copyClipboard(text);
   if (!ok) {
-    showToast("无法自动复制，请手动选中复制", "error");
+    showToast("复制失败，请手动复制", "error");
     return;
   }
   clearTimeout(button._copyTimer);
@@ -260,10 +604,10 @@ function morphSendButton(mode) {
     });
     inner.animate(
       [
-        { opacity: 0, filter: "blur(5px)", transform: "scale(0.9)" },
+        { opacity: 0.3, filter: "blur(3px)", transform: "scale(0.94)" },
         { opacity: 1, filter: "blur(0)", transform: "scale(1)" }
       ],
-      { duration: 220, easing: "cubic-bezier(0.22, 1, 0.36, 1)" }
+      { duration: 200, easing: "cubic-bezier(0.22, 1, 0.36, 1)" }
     );
   }
 }
@@ -435,7 +779,8 @@ function controls() {
   const locked = busy || switchingModel || refreshingState || !ready;
   byId("pdf-add").disabled = locked || uploadingPdf;
   byId("pdf-bind").disabled = locked || uploadingPdf;
-  byId("pdf-save").disabled = byId("pdf-extract").disabled = locked || Boolean(pendingId) || uploadingPdf;
+  byId("pdf-save").disabled = byId("pdf-extract").disabled =
+    locked || Boolean(pendingId) || uploadingPdf || state.target_bound === false;
   byId("send").disabled = locked || !input.value.trim();
   input.disabled = busy || !ready;
   byId("refresh").disabled = busy || switchingModel || refreshingState;
@@ -444,7 +789,7 @@ function controls() {
   byId("model-picker-label").textContent = switchingModel ? "切换中" : "模型";
   byId("pending-badge").hidden = !pendingId;
   document.querySelectorAll("[data-example]").forEach(btn => {
-    btn.disabled = locked || Boolean(pendingId);
+    btn.disabled = locked || Boolean(pendingId) || (state.target_bound === false && btn.dataset.example !== "base");
   });
   document.querySelectorAll("[data-choice]").forEach(btn => {
     btn.disabled = locked || btn.dataset.task !== pendingId;
@@ -454,6 +799,7 @@ function controls() {
   byId("review-confirm").disabled = reviewLocked || !reviewSelections.get(reviewId)?.some(items => items.some(Boolean));
   const emptyCta = byId("empty-try-btn");
   if (emptyCta) emptyCta.disabled = locked || Boolean(pendingId);
+  for (const cs of customSelects) cs.sync(false);
 }
 
 async function switchModel() {
@@ -464,7 +810,7 @@ async function switchModel() {
       !current.models?.includes(requested) || current.model === requested) return;
 
   // 发送前以会话回执为准。网络中断时，再读一次服务端状态。
-  const restoreFocus = document.activeElement === select;
+  const restoreFocus = document.activeElement === select || document.activeElement === select._cselect?.trigger;
   switchingModel = true;
   controls();
   try {
@@ -474,19 +820,20 @@ async function switchModel() {
       body: JSON.stringify({ model: requested })
     });
     if (result.agent?.model !== requested || !Array.isArray(result.agent.models) ||
-        !result.agent.models.includes(requested)) throw new Error("服务未确认所选模型。");
+        !result.agent.models.includes(requested)) throw new Error("模型切换失败，请重试");
     state.capabilities.agent = result.agent;
     renderConnectionDetails();
     showToast(result.message || "已切换至 " + requested);
   } catch (err) {
     select.value = current.model;
+    select._cselect?.sync(false);
     await refreshState();
     showToast(err.message, "error");
   } finally {
     switchingModel = false;
     controls();
     if (restoreFocus && document.activeElement === document.body && !byId("model-picker").hidden) {
-      select.focus({ preventScroll: true });
+      (select._cselect?.trigger || select).focus({ preventScroll: true });
     }
   }
 }
@@ -496,7 +843,7 @@ async function api(path, options) {
   try {
     res = await fetch(path, { cache: "no-store", ...options });
   } catch {
-    const error = new Error("连接中断。恢复后可重新发送这条指令。");
+    const error = new Error("连接中断，请稍后重试");
     error.networkFailure = true;
     throw error;
   }
@@ -504,12 +851,12 @@ async function api(path, options) {
   try {
     data = await res.json();
   } catch (cause) {
-    const error = new Error("服务返回了无法读取的响应。");
+    const error = new Error("响应格式异常，请重试");
     error.networkFailure = cause instanceof TypeError;
     throw error;
   }
   if (!res.ok || data.error) {
-    const error = new Error(data.error || data.message || "服务暂时不可用。");
+    const error = new Error(data.error || data.message || "服务暂不可用");
     error.activity = data.activity;
     error.agent = data.agent;
     throw error;
@@ -630,7 +977,7 @@ function renderCardsView(populatedRows) {
     const rawUrl = urlField ? cellValue(row.fields[urlField.name]) : "";
     const validUrl = /^https?:\/\//i.test(rawUrl) ? safeLink(rawUrl) : null;
     if (validUrl) {
-      const urlPill = link(shortHost(validUrl) + " ↗", validUrl, "paper-url-pill");
+      const urlPill = iconLink(shortHost(validUrl), validUrl, "paper-url-pill");
       urlPill.title = validUrl;
       urlPill.addEventListener("click", e => e.stopPropagation());
       actions.append(urlPill);
@@ -713,15 +1060,15 @@ function renderState() {
 
   renderConnectionDetails();
 
-  byId("records-heading").textContent = state.table_name || "阅读清单";
+  byId("records-heading").textContent = [state.base_name, state.table_name].filter(Boolean).join(" / ") || "阅读清单";
   const populatedRows = state.rows.filter(row => Object.values(row.fields || {}).some(hasCellValue));
   const blankCount = state.rows.length - populatedRows.length;
 
   const rowSummary = blankCount
-    ? populatedRows.length + " 条记录（另 " + blankCount + " 空行）"
-    : populatedRows.length + " 条记录";
+    ? populatedRows.length + " 条（含 " + blankCount + " 空行）"
+    : populatedRows.length + " 条";
   swapInlineText(byId("row-count"), rowSummary);
-  swapInlineText(byId("field-count"), state.fields.length + " 个字段");
+  swapInlineText(byId("field-count"), state.fields.length + " 列");
 
   byId("sample").hidden = !state.sample.title;
   byId("sample-title").textContent = state.sample.title || "";
@@ -734,8 +1081,8 @@ function renderState() {
   renderCardsView(populatedRows);
   renderTableView(populatedRows);
 
-  byId("empty-sheet-text").textContent = blankCount ? "暂无已填写的记录" : "暂无记录";
-  byId("empty-try-btn").hidden = Boolean(populatedRows.length);
+  byId("empty-sheet-text").textContent = state.target_bound === false ? "请先新建多维表格" : "暂无论文记录";
+  byId("empty-try-btn").hidden = state.target_bound === false || Boolean(populatedRows.length);
 
   syncViewVisibility(false);
   requestAnimationFrame(() => selectView(viewMode, false));
@@ -760,7 +1107,16 @@ async function refreshState(manual = false) {
     ready = true;
     renderPdfTray();
     renderState();
-    if (manual) showToast("表格已刷新");
+    const plan = state.pending_dialog || state.workspace_pending;
+    if (plan && plan.id !== pendingId) {
+      pendingId = plan.id;
+      const { article } = appendMessage(plan.message, "assistant");
+      if (plan.evidence_preview) showReviewButton(article, plan.evidence_preview, true);
+      else if (plan.choices.length) appendChoices(article, plan.choices, plan.id);
+    } else if (!plan && "pending_dialog" in state) {
+      pendingId = null;
+    }
+    if (manual) showToast("已刷新");
   } catch (err) {
     if (token !== latestStateRequest) return;
     ready = false;
@@ -772,7 +1128,7 @@ async function refreshState(manual = false) {
     byId("empty-sheet").hidden = false;
     byId("empty-try-btn").hidden = true;
     byId("empty-sheet-text").textContent = "刷新失败：" + err.message;
-    if (!state.rows.length) byId("row-count").textContent = "未取得记录";
+    if (!state.rows.length) byId("row-count").textContent = "读取失败";
     if (manual) showToast(err.message, "error");
   } finally {
     if (token === latestStateRequest) refreshingState = false;
@@ -799,6 +1155,8 @@ function trackActivity(requestId) {
   pill.innerHTML = ICONS.spinner8;
   pill.append(make("span", "正在处理…", "thinking-step"));
   const card = byId("activity-template").content.firstElementChild.cloneNode(true);
+  animateDetailsToggle(card, ".activity-body");
+  const headIcon = card.querySelector(".activity-head-icon");
   const list = card.querySelector(".activity-list");
   const count = card.querySelector(".activity-count");
   const rows = new Map();
@@ -809,8 +1167,17 @@ function trackActivity(requestId) {
   let timer;
   let stopped = false;
   let complete = false;
+  let lastPhase = "";
   const controller = new AbortController();
   const statusNames = { running: "进行中", done: "已完成", failed: "失败" };
+
+  function setPhaseIcon(phase) {
+    if (lastPhase === phase) return;
+    lastPhase = phase;
+    headIcon.innerHTML = phase === "done" ? ICONS.checkPlain
+      : (phase === "failed" || phase === "partial") ? ICONS.statusFail
+      : ICONS.statusRun;
+  }
 
   function render(snapshot) {
     if (snapshot?.request_id !== requestId || !Array.isArray(snapshot.events)) return;
@@ -825,7 +1192,7 @@ function trackActivity(requestId) {
       let row = rows.get(event.id);
       if (!row) {
         row = make("li", undefined, "activity-event");
-        const marker = make("i", undefined, "activity-marker");
+        const marker = make("span", undefined, "activity-marker");
         marker.setAttribute("aria-hidden", "true");
         const elapsedEl = make("span", undefined, "activity-elapsed");
         elapsedEl.setAttribute("role", "timer");
@@ -842,7 +1209,7 @@ function trackActivity(requestId) {
       const ms = event.elapsed_ms;
       const elapsed = !Number.isSafeInteger(ms) || ms < 0 ? "" :
         ms < 1000 ? ms + " ms" : (ms / 1000).toFixed(1) + " 秒";
-      const [, description, statusEl, timeEl] = row.children;
+      const [marker, description, statusEl, timeEl] = row.children;
       const [nameEl, toolEl] = description.children;
       if (nameEl.textContent !== label) nameEl.textContent = label;
       const tool = typeof event.tool === "string" && /^[\p{L}\p{N}][\p{L}\p{N} ·+_-]{0,31}$/u.test(event.tool)
@@ -852,6 +1219,8 @@ function trackActivity(requestId) {
       if (row.dataset.status !== event.status) {
         row.dataset.status = event.status;
         statusEl.textContent = statusNames[event.status];
+        marker.innerHTML = event.status === "done" ? ICONS.checkSm
+          : event.status === "failed" ? ICONS.statusFail : ICONS.statusRun;
       }
       if (timeEl.textContent !== elapsed) timeEl.textContent = elapsed;
     }
@@ -872,7 +1241,8 @@ function trackActivity(requestId) {
     pill.hidden = true;
     card.hidden = false;
     card.dataset.state = phase;
-    const summary = (complete ? (failed ? "含失败步骤" : "已结束") : "进行中") + " · " + rows.size + " 步";
+    setPhaseIcon(phase);
+    const summary = (complete ? (failed ? "部分失败" : "已完成") : "执行中") + " · " + rows.size + " 步";
     if (count.textContent !== summary) count.textContent = summary;
     if (follow) chat.scrollTop = chat.scrollHeight;
   }
@@ -905,8 +1275,10 @@ function trackActivity(requestId) {
     if (!rows.size) {
       article.remove();
     } else if (!complete || requestFailed) {
-      card.dataset.state = complete ? "failed" : "partial";
-      count.textContent = (complete ? "请求失败" : "未取得完整回执") + " · " + rows.size + " 步";
+      const failPhase = complete ? "failed" : "partial";
+      card.dataset.state = failPhase;
+      setPhaseIcon(failPhase);
+      count.textContent = (complete ? "执行失败" : "连接中断") + " · " + rows.size + " 步";
       card.open = false;
     }
   };
@@ -916,7 +1288,7 @@ function showEvidence(items) {
   const container = byId("evidence");
   container.replaceChildren();
   if (!items.length) {
-    container.append(make("p", "未涉及正文摘录。", "muted"));
+    container.append(make("p", "暂无原文出处", "muted"));
     return;
   }
   items.forEach((item, index) => {
@@ -932,7 +1304,7 @@ function showEvidence(items) {
       const source = make("small", undefined, "evidence-source");
       const sourceUrl = item.url || item.source;
       const address = /^https?:\/\//i.test(sourceUrl) ? safeLink(sourceUrl) : null;
-      if (address) source.append(link(item.source + " ↗", address));
+      if (address) source.append(iconLink(item.source, address));
       else source.textContent = item.source;
       block.append(source);
     }
@@ -956,16 +1328,17 @@ function paperSourceLink(address) {
   }
 }
 
-const evidenceKinds = { metric: "关键数据", figure: "图", table: "表", formula: "公式" };
+const evidenceKinds = { metric: "数据", figure: "图片", table: "表格", formula: "公式" };
 
-function reviewItem(item, paperUrl, checkbox) {
+function reviewItem(item, paperUrl, checkbox, activeField) {
   const block = make("section", undefined, "review-item");
   block.dataset.kind = item.kind;
-  const kind = evidenceKinds[item.kind] || "论文摘录";
+  const kind = evidenceKinds[item.kind] || "摘录";
   const meta = make("div", undefined, "review-meta");
   if (checkbox) meta.append(checkbox);
   meta.append(make("span", kind, "evidence-tag"));
-  if (item.field) meta.append(make("span", "回填至「" + item.field + "」"));
+  const fieldName = activeField || item.field;
+  if (fieldName) meta.append(make("span", "写入「" + fieldName + "」", "review-item-field"));
   block.append(meta, PaperRichText.render(make("h4"), item.label, true));
   const latex = item.kind === "formula" && (item.latex || item.value);
   if (latex) {
@@ -975,7 +1348,7 @@ function reviewItem(item, paperUrl, checkbox) {
     copy.addEventListener("click", () => copyWithFeedback(copy, latex, "复制 LaTeX"));
     meta.append(copy);
     const raw = make("details", undefined, "review-quote formula-source");
-    raw.append(make("summary", "查看 LaTeX 原文"), make("pre", latex));
+    raw.append(makeSummaryWithChevron("LaTeX 源码"), make("pre", latex));
     block.append(PaperRichText.formula(make("div"), latex, item.display !== false), raw);
   } else if (item.value && item.value !== item.label) {
     block.append(PaperRichText.render(make("div", undefined, "review-value"), item.value));
@@ -1002,32 +1375,50 @@ function reviewItem(item, paperUrl, checkbox) {
   }
   const imageUrl = paperSourceLink(item.image_url);
   if (imageUrl) {
-    const figure = link("", imageUrl, "review-image");
+    const figure = link(undefined, imageUrl, "review-image");
     const img = make("img");
     img.alt = item.label || "论文原图";
     img.loading = "lazy";
     img.referrerPolicy = "no-referrer";
     img.addEventListener("error", () => img.remove(), { once: true });
     img.src = imageUrl;
-    figure.append(img, make("span", "打开原图 ↗"));
+    const caption = make("span");
+    caption.append(make("span", "打开原图"));
+    const ico = make("span", undefined, "ico-wrap");
+    ico.setAttribute("aria-hidden", "true");
+    ico.innerHTML = ICONS.arrowUpRight;
+    caption.append(ico);
+    figure.append(img, caption);
     block.append(figure);
   }
   if (item.quote && item.quote !== item.value) {
     const quote = make("details", undefined, "review-quote");
-    quote.append(make("summary", "查看原文摘录"), PaperRichText.render(make("blockquote"), item.quote));
+    quote.append(makeSummaryWithChevron("原文片段"), PaperRichText.render(make("blockquote"), item.quote));
     block.append(quote);
   }
   const sourceUrl = paperSourceLink(item.source_url) || paperSourceLink(item.source) || paperUrl;
   const label = item.source && !/^https?:/i.test(item.source) ? item.source : "论文原文";
-  if (sourceUrl) block.append(link(label + " ↗", sourceUrl, "review-source"));
+  if (sourceUrl) block.append(iconLink(label, sourceUrl, "review-source"));
   else if (item.source) block.append(make("small", label));
   return block;
 }
 
-function openEvidenceReview(preview) {
+function showReviewButton(article, preview, restored = false) {
+  const review = make("button", "核对并回填", "icon-pill review-reopen");
+  review.type = "button";
+  review.addEventListener("click", () => openEvidenceReview(preview, restored));
+  article.append(review);
+  review.focus({preventScroll: true});
+  openEvidenceReview(preview, restored);
+}
+
+function openEvidenceReview(preview, restored = false) {
   const dialog = byId("evidence-review");
+  while (reviewColSelects.length) reviewColSelects.pop().destroy();
   const container = byId("review-papers");
   container.replaceChildren();
+  const tabsEl = byId("review-paper-tabs");
+  tabsEl.replaceChildren();
   const paperSelect = byId("review-paper-select");
   paperSelect.replaceChildren();
   const kindSelect = byId("review-kind");
@@ -1035,48 +1426,109 @@ function openEvidenceReview(preview) {
   const readyPapers = preview.papers.filter(paper => paper.status === "ready");
   const actionable = Boolean(reviewId && reviewId === pendingId && readyPapers.length);
   if (actionable && !reviewSelections.has(reviewId)) {
-    reviewSelections.set(reviewId, preview.papers.map(paper =>
-      paper.status === "ready" ? paper.items.map(() => true) : []));
+    let saved;
+    if (restored) {
+      try { saved = JSON.parse(sessionStorage.getItem("paper-review-choices")); } catch {}
+    }
+    const choices = preview.papers.map(paper =>
+      paper.status === "ready" ? paper.items.map(() => !restored) : []);
+    const matches = saved?.id === reviewId && Array.isArray(saved.choices) &&
+      saved.choices.length === choices.length && choices.every((items, i) =>
+        Array.isArray(saved.choices[i]) && saved.choices[i].length === items.length &&
+        saved.choices[i].every(value => typeof value === "boolean"));
+    reviewSelections.set(reviewId, matches ? saved.choices : choices);
+    const defaultOverrides = preview.papers.map(() => ({}));
+    const fieldsMatch = matches && Array.isArray(saved.fields) &&
+      saved.fields.length === preview.papers.length &&
+      saved.fields.every((entry, i) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+        const allowed = new Set(preview.papers[i].target_columns || []);
+        const count = (preview.papers[i].items || []).length;
+        return Object.entries(entry).every(([k, v]) => /^\d+$/.test(k) && Number(k) < count && allowed.has(v));
+      });
+    reviewFieldOverrides.set(reviewId, fieldsMatch ? saved.fields.map(m => ({ ...m })) : defaultOverrides);
+  } else if (actionable && !reviewFieldOverrides.has(reviewId)) {
+    reviewFieldOverrides.set(reviewId, preview.papers.map(() => ({})));
   }
   const selections = reviewSelections.get(reviewId);
+  const fieldOverrides = reviewFieldOverrides.get(reviewId);
   function updateCount() {
+    if (actionable) {
+      try {
+        sessionStorage.setItem("paper-review-choices", JSON.stringify({
+          id: preview.id, choices: selections, fields: fieldOverrides
+        }));
+      } catch {}
+    }
     const counts = (selections || []).map(items => items.filter(Boolean).length);
     const papers = counts.filter(Boolean).length;
     const items = counts.reduce((total, count) => total + count, 0);
-    byId("review-confirm").textContent = "确认回填 " + papers + " 篇（" + items + " 项）";
+    byId("review-confirm").textContent = "确认写入 " + papers + " 篇 · " + items + " 项";
     controls();
   }
   const target = (state.mode === "feishu" ? "飞书" : "本地") + "「" + (state.table_name || "阅读清单") + "」";
-  byId("review-summary").textContent = preview.papers.length + " 篇论文 · " +
-    readyPapers.length + " 篇可回填 · " + target;
+  byId("review-summary").textContent = readyPapers.length + "/" + preview.papers.length + " 篇可写入 · " + target;
+  tabsEl.hidden = !preview.papers.length;
+  const tabRefs = [];
+  const shortActions = { create: "新增", update: "更新", unchanged: "无变化" };
   preview.papers.forEach((paper, index) => {
     const paperUrl = paperSourceLink(paper.url);
     const section = make("section", undefined, "review-paper");
     const title = paper.title || paper.url || "论文";
     paperSelect.add(new Option((index + 1) + ". " + title, index));
-    const action = { create: "新建记录", update: "更新记录", unchanged: "无需修改" }[paper.action];
+    const action = { create: "新增", update: "更新", unchanged: "无变化" }[paper.action];
     const items = Array.isArray(paper.items) ? paper.items : [];
+    const tabBtn = make("button", undefined, "review-tab");
+    tabBtn.type = "button";
+    tabBtn.setAttribute("role", "tab");
+    tabBtn.setAttribute("aria-selected", String(index === 0));
+    tabBtn.title = title;
+    tabBtn.dataset.state = paper.status === "ready" ? "ready" : "skipped";
+    const tabTop = make("span", undefined, "review-tab-top");
+    tabTop.append(make("span", String(index + 1), "review-tab-idx"), make("span", title, "review-tab-title"));
+    const tabFoot = make("span", undefined, "review-tab-foot");
+    const tabCount = make("span", paper.status === "ready" ? items.length + "/" + items.length + " 项" : "跳过", "review-tab-count");
+    const tabAction = make("span", paper.status === "ready" ? (shortActions[paper.action] || "") : "需核对", "review-tab-action");
+    tabFoot.append(tabCount, tabAction);
+    tabBtn.append(tabTop, tabFoot);
+    tabBtn.addEventListener("click", () => {
+      if (paperSelect.selectedIndex === index) return;
+      paperSelect.selectedIndex = index;
+      paperSelect.onchange();
+      paperSelect._cselect?.sync(false);
+    });
+    tabsEl.append(tabBtn);
+    tabRefs.push(tabBtn);
+
     const paperMeta = make("span", paper.status === "ready"
-      ? [items.length + " 项", action].filter(Boolean).join(" · ") : "跳过本篇", "review-paper-meta");
+      ? [items.length + " 项", action].filter(Boolean).join(" · ") : "暂不写入", "review-paper-meta");
     const mapping = make("p", undefined, "review-mapping");
     section.append(make("h3", title), paperMeta);
     const selected = selections?.[index];
+    const paperOverrides = fieldOverrides?.[index] || {};
     const group = make("input");
     const inputs = [];
+    const itemFieldNodes = [];
+    function effectiveField(i) {
+      return paperOverrides[i] || items[i]?.field || "";
+    }
     function syncGroup() {
       group.checked = selected.every(Boolean);
       group.indeterminate = !group.checked && selected.some(Boolean);
       const count = selected.filter(Boolean).length;
       paperMeta.textContent = "已选 " + count + "/" + items.length + " 项" +
         (group.checked && action ? " · " + action : "");
+      tabCount.textContent = count + "/" + items.length + " 项";
+      tabBtn.dataset.state = count ? "ready" : "empty";
+      const hasOverride = Object.keys(paperOverrides).length > 0;
       const evidenceFields = new Set(items.map(item => item.field));
-      const selectedFields = new Set(items.filter((_, i) => selected[i]).map(item => item.field));
-      const fieldNames = (paper.fields || []).map(field => field.name)
-        .filter(name => !evidenceFields.has(name) || selectedFields.has(name));
-      const modes = { set: "填入", append: "追加", unchanged: "保留原值" };
-      mapping.textContent = group.checked
-        ? (paper.fields || []).map(field => (modes[field.mode] || "填入") + "「" + field.name + "」").join(" · ")
-        : count && fieldNames.length ? "目标列 · " + fieldNames.join("、") : "";
+      const activeEvidenceCols = [...new Set(items.flatMap((item, i) => selected[i] ? [effectiveField(i)] : []).filter(Boolean))];
+      const idFields = (paper.fields || []).map(field => field.name).filter(name => !evidenceFields.has(name));
+      const allTargetCols = [...new Set([...activeEvidenceCols, ...idFields])];
+      const modes = { set: "写入", append: "追加", unchanged: "不变" };
+      mapping.textContent = group.checked && !hasOverride
+        ? (paper.fields || []).map(field => (modes[field.mode] || "写入") + "「" + field.name + "」").join(" · ")
+        : count && allTargetCols.length ? "写入列 · " + allTargetCols.join("、") : "";
       mapping.hidden = !mapping.textContent;
     }
     if (selected?.length) {
@@ -1094,16 +1546,55 @@ function openEvidenceReview(preview) {
         updateCount();
       });
     }
-    if (paperUrl) section.append(link("打开论文 ↗", paperUrl, "review-source"));
-    if (paper.source_version) section.append(make("p", "证据版本 · " + paper.source_version, "review-mapping"));
+    if (paperUrl) section.append(iconLink("查看原文", paperUrl, "review-source"));
+    if (paper.source_version) section.append(make("p", "来源 · " + paper.source_version, "review-mapping"));
     const targetUrl = paperSourceLink(paper.target_url);
-    if (targetUrl) section.append(link("打开已收藏的目标记录原文 ↗", targetUrl, "review-source"));
+    if (targetUrl) section.append(iconLink("查看表中原链接", targetUrl, "review-source"));
     if (paper.error) section.append(make("p", paper.error, "review-error"));
     if (paper.notice) section.append(make("p", paper.notice, "review-mapping"));
     if (paper.fields?.length) {
-      if (!selected?.length) mapping.textContent = "目标列 · " + paper.fields.map(field => field.name).join("、");
+      if (!selected?.length) mapping.textContent = "写入列 · " + paper.fields.map(field => field.name).join("、");
       section.append(mapping);
     }
+
+    const pendingColSelects = [];
+    if (actionable && paper.status === "ready" && Array.isArray(paper.target_columns) && paper.target_columns.length > 1 && items.length) {
+      const kindOrder = ["metric", "table", "figure", "formula"];
+      const byKind = kindOrder
+        .map(kind => ({ kind, indices: items.flatMap((it, i) => it.kind === kind ? [i] : []) }))
+        .filter(g => g.indices.length > 0);
+      if (byKind.length) {
+        const colBar = make("div", undefined, "review-col-bar");
+        colBar.append(make("span", "写入列", "review-col-bar-title"));
+        for (const { kind, indices } of byKind) {
+          const chip = make("label", undefined, "review-col-chip");
+          chip.append(make("span", evidenceKinds[kind] || kind));
+          const colSelect = make("select");
+          colSelect.setAttribute("aria-label", (evidenceKinds[kind] || kind) + "写入列");
+          const defaultFields = new Set(indices.map(i => items[i].field));
+          const multiDefault = defaultFields.size > 1;
+          if (multiDefault) colSelect.add(new Option("自动分列", "__auto__"));
+          for (const col of paper.target_columns) colSelect.add(new Option(col, col));
+          const currentFields = new Set(indices.map(i => effectiveField(i)));
+          colSelect.value = currentFields.size === 1 ? [...currentFields][0] : "__auto__";
+          colSelect.addEventListener("change", () => {
+            const val = colSelect.value;
+            for (const i of indices) {
+              if (val === "__auto__" || val === items[i].field) delete paperOverrides[i];
+              else paperOverrides[i] = val;
+              if (itemFieldNodes[i]) itemFieldNodes[i].textContent = "写入「" + effectiveField(i) + "」";
+            }
+            if (selected?.length) syncGroup();
+            updateCount();
+          });
+          chip.append(colSelect);
+          colBar.append(chip);
+          pendingColSelects.push(colSelect);
+        }
+        section.append(colBar);
+      }
+    }
+
     items.forEach((item, itemIndex) => {
       let checkbox;
       if (selected?.length) {
@@ -1119,9 +1610,16 @@ function openEvidenceReview(preview) {
         });
         inputs.push(checkbox);
       }
-      section.append(reviewItem(item, paperUrl, checkbox));
+      const card = reviewItem(item, paperUrl, checkbox, effectiveField(itemIndex));
+      itemFieldNodes[itemIndex] = card.querySelector(".review-item-field");
+      section.append(card);
     });
     container.append(section);
+    for (const colSelect of pendingColSelects) {
+      reviewColSelects.push(createCustomSelect(colSelect, {
+        variant: "pill", placement: "bottom", minWidth: 136, maxHeight: 200
+      }));
+    }
   });
   kindSelect.onchange = () => {
     const active = container.children[paperSelect.selectedIndex];
@@ -1137,6 +1635,10 @@ function openEvidenceReview(preview) {
   paperSelect.onchange = () => {
     const index = paperSelect.selectedIndex;
     Array.from(container.children).forEach((section, i) => { section.hidden = i !== index; });
+    tabRefs.forEach((btn, i) => {
+      btn.setAttribute("aria-selected", String(i === index));
+      if (i === index) btn.scrollIntoView({ block: "nearest", inline: "nearest" });
+    });
     const items = preview.papers[index].items || [];
     kindSelect.replaceChildren(new Option("全部（" + items.length + "）", ""));
     for (const [kind, name] of Object.entries(evidenceKinds)) {
@@ -1144,8 +1646,10 @@ function openEvidenceReview(preview) {
       if (count) kindSelect.add(new Option(name + "（" + count + "）", kind));
     }
     kindSelect.onchange();
+    kindSelect._cselect?.sync(false);
   };
   paperSelect.onchange();
+  paperSelect._cselect?.sync(false);
   dialog.querySelector("footer").hidden = !actionable;
   updateCount();
   dialog.showModal();
@@ -1155,11 +1659,15 @@ function openEvidenceReview(preview) {
 
 function appendEvidenceResults(article, results) {
   const list = make("ul", undefined, "review-results");
-  const statuses = { verified: "回读一致", excluded: "未勾选", skipped: "已跳过", failed: "处理失败", unverified: "待核验" };
+  const statuses = { verified: "已核验", excluded: "未选中", skipped: "已跳过", failed: "失败", unverified: "待核对" };
   for (const result of results) {
     const row = make("li");
     row.dataset.status = result.status;
-    row.append(make("strong", statuses[result.status] || "待核验"), make("span", result.title || result.url));
+    const badge = make("span", undefined, "review-res-badge");
+    badge.innerHTML = result.status === "verified" ? ICONS.checkSm
+      : result.status === "failed" ? ICONS.statusFail : ICONS.statusSkip;
+    badge.append(make("span", statuses[result.status] || "待核验"));
+    row.append(badge, make("span", result.title || result.url));
     if (result.message) row.append(make("small", result.message));
     list.append(row);
   }
@@ -1185,16 +1693,34 @@ function appendCollection(article, cards) {
       const links = make("div", undefined, "collection-links");
       for (const raw of card.sources) {
         const address = safeLink(raw);
-        if (address) links.append(link(shortHost(address) || "来源", address));
+        if (address) links.append(iconLink(shortHost(address) || "来源", address));
       }
       if (card.fulltext_url && safeLink(card.fulltext_url)) {
-        links.append(link("打开全文 ↗", safeLink(card.fulltext_url)));
+        links.append(iconLink("打开全文", safeLink(card.fulltext_url)));
       }
       block.append(links);
     }
     list.append(block);
   }
   article.append(list);
+}
+
+function appendChoices(article, labels, taskId) {
+  const choices = make("div", undefined, "choices");
+  labels.forEach((choice, idx) => {
+    const isCancel = /^(取消|算了|不用了)$/.test(choice);
+    const button = make("button", choice, isCancel ? "choice-cancel" : "");
+    button.type = "button";
+    button.style.animationDelay = Math.min(idx * 45, 200) + "ms";
+    button.dataset.choice = choice;
+    button.dataset.task = taskId;
+    button.addEventListener("click", () => {
+      button.classList.add("choice-picked");
+      submit(choice);
+    });
+    choices.append(button);
+  });
+  article.append(choices);
 }
 
 async function submit(text) {
@@ -1205,9 +1731,14 @@ async function submit(text) {
   const selection = confirm && reviewSelections.has(task)
     ? reviewSelections.get(task).map(items => items.flatMap((checked, index) => checked ? [index] : []))
     : undefined;
+  const rawFields = confirm && reviewFieldOverrides.has(task) ? reviewFieldOverrides.get(task) : undefined;
+  const fields = rawFields && rawFields.some(map => map && Object.keys(map).length)
+    ? rawFields.map(map => (map && Object.keys(map).length ? { ...map } : null))
+    : undefined;
   const matchingRetry = retryableRequest?.message === instruction && retryableRequest.task === task &&
-    JSON.stringify(retryableRequest.selection) === JSON.stringify(selection);
-  const request = matchingRetry ? retryableRequest : { id: crypto.randomUUID(), message: instruction, task, selection };
+    JSON.stringify(retryableRequest.selection) === JSON.stringify(selection) &&
+    JSON.stringify(retryableRequest.fields) === JSON.stringify(fields);
+  const request = matchingRetry ? retryableRequest : { id: crypto.randomUUID(), message: instruction, task, selection, fields };
   retryableRequest = null;
 
   busy = true;
@@ -1227,6 +1758,7 @@ async function submit(text) {
         message: instruction,
         request_id: request.id,
         evidence_selection: request.selection,
+        ...(request.fields ? { evidence_fields: request.fields } : {}),
         ...(task ? { pending_id: task } : {})
       })
     });
@@ -1235,40 +1767,29 @@ async function submit(text) {
 
     const { article } = appendMessage(result.message || "已完成。", "assistant");
     appendModelTrace(article, result.agent);
+    if (result.target_changed) {
+      selectedId = reviewId = null;
+      reviewSelections.clear();
+      reviewFieldOverrides.clear();
+      document.querySelectorAll(".review-reopen").forEach(button => { button.disabled = true; });
+      showEvidence([]);
+      const target = feishuTableLink(result.workspace_url);
+      if (target) article.append(iconLink("打开飞书数据表", target, "icon-pill"));
+    }
     if (result.collection?.length) appendCollection(article, result.collection);
 
     if (result.evidence_preview?.papers?.length) {
-      const preview = result.evidence_preview;
-      const review = make("button", "查看提取结果", "icon-pill review-reopen");
-      review.type = "button";
-      review.addEventListener("click", () => openEvidenceReview(preview));
-      article.append(review);
-      review.focus({preventScroll: true});
-      openEvidenceReview(preview);
+      showReviewButton(article, result.evidence_preview);
     } else if (pendingId && Array.isArray(result.choices) && result.choices.length) {
-      const choices = make("div", undefined, "choices");
-      result.choices.forEach((choice, idx) => {
-        const isCancel = /^(取消|算了|不用了)$/.test(choice);
-        const button = make("button", choice, isCancel ? "choice-cancel" : "");
-        button.type = "button";
-        button.style.animationDelay = Math.min(idx * 45, 200) + "ms";
-        button.dataset.choice = choice;
-        button.dataset.task = pendingId;
-        button.addEventListener("click", () => {
-          button.classList.add("choice-picked");
-          submit(choice);
-        });
-        choices.append(button);
-      });
-      article.append(choices);
+      appendChoices(article, result.choices, pendingId);
     }
     if (result.evidence_results?.length) appendEvidenceResults(article, result.evidence_results);
 
     const download = safeLink(result.download_url, true);
     if (download) {
       const pdfWrap = make("div", undefined, "pdf-actions");
-      pdfWrap.append(link("打开 PDF ↗", download, "pdf-pill"));
-      const savePdf = link("下载 PDF ↓", download, "pdf-pill");
+      pdfWrap.append(iconLink("打开 PDF", download, "pdf-pill"));
+      const savePdf = iconLink("下载 PDF", download, "pdf-pill", ICONS.download);
       savePdf.removeAttribute("target");
       savePdf.download = "";
       pdfWrap.append(savePdf);
@@ -1308,7 +1829,7 @@ async function submit(text) {
     }
     const { article } = appendMessage(err.message, "error");
     if (err.agent?.steps?.length) appendModelTrace(article, err.agent);
-    else article.append(make("p", "本次请求失败 · 未取得模型调用记录", "model-trace"));
+    else article.append(make("p", "请求失败", "model-trace"));
     showToast(err.message, "error");
   } finally {
     busy = false;
@@ -1335,7 +1856,7 @@ function renderPdfTray(selected = byId("pdf-select").value) {
   const target = byId("pdf-target");
   const previous = unchanged ? target.value : "";
   const {titleField, urlField} = detectPrimaryFields(state.fields || []);
-  target.replaceChildren(new Option("输入 DOI 或论文链接", ""));
+  target.replaceChildren(new Option("手动输入链接或 DOI", ""));
   for (const row of state.rows || []) {
     const url = cellValue(row.fields[urlField?.name]);
     if (url && /^https:\/\//i.test(url)) {
@@ -1352,15 +1873,18 @@ function renderPdfTray(selected = byId("pdf-select").value) {
     byId("pdf-title").value = item.title;
   }
   byId("pdf-status").textContent = item.paper_url ? "" : item.candidates.length
-    ? "请对照首页核对候选标识与版本，再确认关联。"
-    : "文件已保留。可稍后补充论文链接，或从阅读清单选择论文。";
+    ? "已识别候选链接，请核对后关联。"
+    : "已暂存 PDF，请补充论文链接或从清单关联。";
+  select._cselect?.sync(false);
+  target._cselect?.sync(false);
 }
 
 async function receivePdfs(files) {
   if (busy || uploadingPdf || !ready || !files.length) return;
   uploadingPdf = true;
   controls();
-  byId("pdf-add").textContent = "正在读取…";
+  const pdfAddLabel = byId("pdf-add").querySelector(".pdf-add-label") || byId("pdf-add");
+  pdfAddLabel.textContent = "解析中…";
   try {
     for (const file of files) {
       try {
@@ -1378,7 +1902,7 @@ async function receivePdfs(files) {
     }
   } finally {
     uploadingPdf = false;
-    byId("pdf-add").textContent = "添加 PDF";
+    pdfAddLabel.textContent = "添加 PDF";
     byId("pdf-files").value = "";
     controls();
   }
@@ -1416,13 +1940,13 @@ byId("pdf-bind").addEventListener("click", async () => {
   }
   uploadingPdf = true;
   controls();
-  byId("pdf-status").textContent = "正在核对关联…";
+  byId("pdf-status").textContent = "关联中…";
   try {
     const item = await api("/api/attachments/" + id + "/bind", {method: "POST",
       headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
     state.attachments = state.attachments.map(other => other.id === item.id ? item : other);
     renderPdfTray(item.id);
-    showToast("已关联正文，可开始提取");
+    showToast("已关联，可提取数据");
   } catch (error) {
     byId("pdf-status").textContent = error.message;
   } finally {
@@ -1460,7 +1984,9 @@ function runExample(key) {
     save: "把 " + (state.sample.url || "https://arxiv.org/abs/2005.11401") + " 存进" + (state.table_name || "阅读清单"),
     method: "给刚才那篇补一句方法概述",
     notes: "把刚才那篇的方法写进笔记",
-    schema: "新建文本列 审阅意见"
+    schema: "新建文本列 审阅意见",
+    table: "在当前多维表格里新建数据表「论文精读」",
+    base: "新建多维表格「论文资料库」，首张数据表叫「论文清单」"
   };
   if (examples[key]) submit(examples[key]);
 }
@@ -1512,6 +2038,13 @@ byId("close-detail").addEventListener("click", () => byId("detail").close());
 byId("detail").addEventListener("click", event => {
   if (event.target === byId("detail")) byId("detail").close();
 });
+
+animateDetailsToggle(byId("pdf-tray"), ".pdf-tray-body");
+createCustomSelect(byId("model-select"), { variant: "pill", placement: "top", minWidth: 216, maxHeight: 248 });
+createCustomSelect(byId("pdf-select"), { variant: "field", placement: "top", matchTriggerWidth: true, fullWidth: true });
+createCustomSelect(byId("pdf-target"), { variant: "field", placement: "top", matchTriggerWidth: true, fullWidth: true });
+createCustomSelect(byId("review-paper-select"), { variant: "pill", placement: "bottom", matchTriggerWidth: true, fullWidth: true });
+createCustomSelect(byId("review-kind"), { variant: "pill", placement: "bottom", matchTriggerWidth: true, fullWidth: true });
 
 controls();
 selectView("cards", false);

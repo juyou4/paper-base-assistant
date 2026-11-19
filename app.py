@@ -19,6 +19,7 @@ import paper_attachments
 import papers
 from table_store import FeishuTable, LarkCliTable, LocalTable, TableError
 from workflow import Conversation
+from workspace_actions import target_link
 
 
 ROOT = Path(__file__).resolve().parent
@@ -48,10 +49,13 @@ class Application:
         else:
             self.table = LarkCliTable(db, os.getenv("LARK_CLI", "lark-cli"), base, table_id)
         self.name = self.table.name if mode == "local" else (os.getenv("FEISHU_TABLE_NAME") or config.get("table_name") or "飞书测试表")
+        if mode != "local" and not table_id:
+            self.name = "尚未选择数据表"
         self.feishu_url = ""
         if mode != "local":
             from tools.feishu_setup import browser_url
             self.feishu_url = browser_url(config, base, table_id)
+        self.base_name = config.get("base_name", "") if self.feishu_url else ""
         self.sessions = {}
         self.lock = threading.Lock()
 
@@ -59,21 +63,46 @@ class Application:
         now = time.monotonic()
         with self.lock:
             if cookie not in self.sessions or now - self.sessions[cookie][1] > 7200:
-                self.sessions = {k: v for k,v in self.sessions.items() if now - v[1] <= 7200}
+                for key, (old_chat, seen) in list(self.sessions.items()):
+                    if now - seen > 7200:
+                        old_chat.close()
+                        del self.sessions[key]
                 if not (isinstance(cookie, str) and re.fullmatch(r"[\w-]{32}", cookie)
                         and paper_attachments.AttachmentLibrary(self.data_dir, cookie).index.is_file()):
                     cookie = secrets.token_urlsafe(24)
-                self.sessions[cookie] = [Conversation(self.table, self.data_dir, self.name), now]
+                self.sessions[cookie] = [Conversation(self.table, self.data_dir, self.name, self.feishu_url, self.base_name), now]
             self.sessions[cookie][1] = now
             return cookie, self.sessions[cookie][0]
 
     def state(self, chat=None):
         agent = model_support.selection_info(chat.selected_model if chat else None)
-        return {"mode": "local" if self.mode == "local" else "feishu", "table_name": self.name,
-                "fields": self.table.schema(), "rows": self.table.rows(),
+        with chat.lock if chat else self.lock:
+            table = chat.table if chat else self.table
+            name = chat.table_name if chat else self.name
+            bound = bool(getattr(table, "table_id", True))
+            link = target_link(table, chat.base_url) if chat else self.feishu_url
+            fields, rows = (table.schema(), table.rows()) if bound else ([], [])
+            base_name = chat.base_name if chat else self.base_name
+            pending = chat.pending if chat else None
+            dialog = None
+            if pending:
+                if pending["stage"] == "evidence_confirm":
+                    reply = pending["reply"]
+                    dialog = {"id": pending["id"], "message": reply["message"], "evidence_preview": reply["evidence_preview"]}
+                else:
+                    dialog = {k: pending[k] for k in ("id", "message", "choices")}
+            workspace_pending = dialog if pending and pending["stage"] in {"workspace_name", "workspace_create"} else None
+        return {"mode": "local" if self.mode == "local" else "feishu", "table_name": name,
+                "target_bound": bound, "base_name": base_name, "workspace_pending": workspace_pending, "pending_dialog": dialog,
+                "fields": fields, "rows": rows,
                 "sample": {"title": papers.SAMPLE["title"], "url": "https://arxiv.org/abs/" + papers.SAMPLE_ID},
-                "download_url": "/api/sample.pdf", "feishu_url": self.feishu_url,
+                "download_url": "/api/sample.pdf", "feishu_url": link,
                 "capabilities": {"model": agent["enabled"], "agent": agent, "activity": True}}
+
+    def close(self):
+        for chat, _ in self.sessions.values():
+            chat.close()
+        self.table.close()
 
     def switch_model(self, chat, name):
         with chat.lock:
@@ -129,6 +158,7 @@ class Handler(BaseHTTPRequestHandler):
     def dispatch(self, method):
         run = None
         cookie = None
+        agent = None
         try:
             if not self.allowed_host():
                 self.send_json({"error": "请从本机服务地址打开。"}, 403)
@@ -141,8 +171,8 @@ class Handler(BaseHTTPRequestHandler):
                 snapshot["attachments"] = paper_attachments.AttachmentLibrary(app.data_dir, cookie).list()
                 self.send_json(snapshot, cookie=cookie)
             elif route.path == "/api/attachments" or ATTACHMENT_ROUTE.fullmatch(route.path):
-                cookie, _chat = self.browser_session()
-                self.attachment_request(method, route, cookie)
+                cookie, chat = self.browser_session()
+                self.attachment_request(method, route, cookie, chat)
             elif method == "GET" and route.path == "/api/activity":
                 ids = parse_qs(route.query).get("request_id", [])
                 if len(ids) != 1:
@@ -173,15 +203,20 @@ class Handler(BaseHTTPRequestHandler):
                 request_id = str(uuid.uuid4()) if body.get("request_id") is None else str(uuid.UUID(str(body["request_id"])))
                 run = chat.activity.begin(request_id)
                 with (run.recording(), chat.lock, model_support.using_model(chat.selected_model),
-                      model_support.trace_calls() as steps, paper_attachments.session_scope(app.data_dir, cookie)):
+                      model_support.trace_calls(include_failed=True) as steps, paper_attachments.session_scope(app.data_dir, cookie)):
+                    agent = {**model_support.agent_info(), "steps": steps}
                     options = {}
                     if "evidence_selection" in body:
                         if not isinstance(body["evidence_selection"], list):
                             raise ValueError("请选择要回填的证据项。")
                         options["evidence_selection"] = body["evidence_selection"]
+                    if "evidence_fields" in body and body["evidence_fields"] is not None:
+                        if not isinstance(body["evidence_fields"], list):
+                            raise ValueError("目标列设置无效，请重新选择。")
+                        options["evidence_fields"] = body["evidence_fields"]
                     result = chat.respond(message, body.get("pending_id"), request_id, **options)
                     if steps:
-                        result["agent"] = {**model_support.agent_info(), "steps": steps}
+                        result["agent"] = agent
                 result["activity"] = run.snapshot()
                 self.send_json(result, cookie=cookie)
             elif method == "GET" and route.path in {"/api/sample.pdf", "/api/pdf"}:
@@ -204,17 +239,19 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             return
         except (ValueError, TableError) as exc:
-            self.send_error_result(str(exc), 400, run, cookie)
+            self.send_error_result(str(exc), 400, run, cookie, agent)
         except Exception:
-            self.send_error_result("处理失败，请检查服务配置和数据源，再重试。", 500, run, cookie)
+            self.send_error_result("处理失败，请检查服务配置和数据源，再重试。", 500, run, cookie, agent)
 
-    def send_error_result(self, message, code, run, cookie):
+    def send_error_result(self, message, code, run, cookie, agent):
         result = {"error": message}
+        if agent and agent["steps"]:
+            result["agent"] = agent
         if run is not None:
             result["activity"] = run.snapshot()
         self.send_json(result, code, cookie=cookie)
 
-    def attachment_request(self, method, route, cookie):
+    def attachment_request(self, method, route, cookie, chat):
         app = self.server.app
         library = paper_attachments.AttachmentLibrary(app.data_dir, cookie)
         match = ATTACHMENT_ROUTE.fullmatch(route.path)
@@ -244,8 +281,11 @@ class Handler(BaseHTTPRequestHandler):
                 library.path(match[1])
                 if set(body) == {"record_id", "expected_url"} and all(isinstance(v, str) for v in body.values()):
                     from evidence_workflow import _field
-                    schema = app.table.schema()
-                    row = app.table.get(body["record_id"])
+                    with chat.lock:
+                        if not getattr(chat.table, "table_id", True):
+                            raise ValueError("还没有当前数据表，请先建表，或直接关联论文链接。")
+                        schema = chat.table.schema()
+                        row = chat.table.get(body["record_id"])
                     if not row:
                         raise ValueError("目标记录已变更，请刷新阅读清单。")
                     fields = row["fields"]
@@ -296,7 +336,7 @@ def main():
         pass
     finally:
         server.server_close()
-        app.table.close()
+        app.close()
 
 
 if __name__ == "__main__":

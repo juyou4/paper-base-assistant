@@ -2,6 +2,7 @@
 
 import re
 from http.client import HTTPException
+from typing import NamedTuple
 
 
 
@@ -27,17 +28,91 @@ TABLE_CHANGE = re.compile(r"删|改|移除|清空|写|填|建列|加列|新增|�
                           r"提取|抽取|回填|下载|同步|复制|导出|换成|转发|另外|另一|其他表|别的表|不要|不用|别看|别查|取消|"
                           r"保存|收藏|归档|登记|收录|(?:存|放|记|收|加).{0,3}(?:到|进|入|在)|整理|生成|获取论文")
 LOOKUP_CATEGORIES = {"overview", "columns", "count", "paper_count", "clarify"}
-FILTERED_LOOKUP = re.compile(r"包含|含有|筛选|过滤|排序|排名|关键[词字]|只找|搜索|匹配|昨[天日]|上[周月]|最近[一二三四五\d]|前\d+")
+FILTERED_LOOKUP = re.compile(r"包含|含有|筛选|过滤|排序|排名|关键[词字]|只找|搜索|匹配|[今昨][天日]|[上本这][周月]|"
+                             r"最近|近[一二三四五\d]|前[一二三四五\d]|(?:19|20)\d{2}年|作者(?:是|为)|已读|未读")
+PAPER_COUNT_UNIT = re.compile(r"(?:多少|几)篇|篇数|(?:论文|文献|文章)(?:总数|数量)")
+RECORD_COUNT_UNIT = re.compile(r"(?:多少|几)(?:条(?:记录|数据|条目)?|行)|记录数|条数|行数")
+QUALIFIED_PAPERS = re.compile(r"(?:多少|几)篇\s*([^，,。！？?]{0,40}?)(?:论文|文章|文献)")
+
+class NamedLookup(NamedTuple):
+    kind: str
+    name: str
+
+
+_READ_PREFIX = re.compile(r"^(?:(?:麻烦(?:你)?|请问|请|你能不能|能不能|能否|能帮我|帮我|给我|我想知道|我只想|只想|"
+                          r"我想|只|先|告诉我|查(?:一查|一下|查|看|询|下)|看(?:一看|一下|看|下)|列出|我(?!的|们)|现在|目前|之前)"
+                          r"[，,\s]*)+")
+_NO_EDIT_PREFIX = re.compile(r"^(?:先)?(?:别|不用|不要)(?:动|改动?|修改|写入)(?:任何)?(?:数据|表格|记录|这张表)?[，,。\s]+")
+_SKIP_QUERY = re.compile(r"^(?:(?:请|我|你|这次|先|暂时)\s*)*(?:禁止|不许|不必|不想|不用|不要|不|别)(?:再|去)?"
+                         r"(?:读|看|查|浏览|展示|列出)")
+_SCOPE_PREFIX = re.compile(r"^(?:(?:当前|我的|本|这[张份个])(?:的)?|飞书)?(?:多维表格|数据表|表(?!头)格?|论文库|文献库|库里|清单)"
+                           r"(?:里面|里边|里|内|中)?的?\s*")
+_PAPERS = r"(?:论文|文献|文章)"
+_SAVED = r"(?:(?:我们|我)?(?:已经|之前|目前|现在|都|一共|总共|已)*(?:收藏|保存|收录|收集|存|收)(?:下来|好|过)?(?:了|的|着)?)?"
+_PAPER_REQUEST = re.compile(rf"(?:现在|目前|这里|一共|总共|都)*{_SAVED}(?:一共|总共|都|已经|还)*(?:有|是)?"
+                            rf"(?:(?P<count>多少(?:篇)?|几篇)(?:{_PAPERS})?|(?:哪些|哪几篇|什么|啥)(?:篇)?{_PAPERS})")
+_PAPERS_FIRST = re.compile(rf"{_SAVED}{_PAPERS}(?:一共|总共|现在|目前|都)*(?:有|是)?"
+                           r"(?:(?P<count>多少(?:篇)?|几篇)|哪些|哪几篇)")
+_COLUMN_KIND = re.compile(r"(?P<name>.+?)(?P<marker>这(?:一)?[列栏]|那(?:一)?[列栏]|这一字段|这个字段|字段|栏位|列|栏)?"
+                          r"(?:具体|到底)?(?:的?(?:数据)?(?:类型|格式)(?:(?:到底|具体)?(?:是什么|是啥|是哪种|是什么类型))?|"
+                          r"(?:属于|是|用的(?:是)?)(?:什么|哪种|啥)(?:数据|字段)?(?:类型|格式)|"
+                          r"(?:是|属于)(?:文本|超链接|链接)还是(?:文本|超链接|链接))")
+_TITLE_QUERY = re.compile(rf"(?P<ask>有|找得到|有没有|是否有|(?:有没有|是否)(?:已经|已)?(?:收录|收藏|保存|存)(?:过|了)?|"
+                          rf"(?:已(?:经)?)?(?:收录|收藏|保存|存)过)\s*《(?P<title>[^《》]+)》"
+                          rf"(?:这(?:一)?篇(?:{_PAPERS})?)?(?:吗|没有|了没)?")
+_READ_THEN_WRITE = re.compile(r"(?:然后|之后|接着|顺便|并且|再|同时|[，,；;])\s*(?:再|把|将|请)?"
+                              r".{0,12}(?:删|清空|覆盖|改成|改为|改名|新增|建列|写|填|存(?:入|进|下)|导入|收藏)")
+
+
+def _casual_lookup(text, table_name):
+    """只消费完整问句。保留带引号的标题、字段原样，避免把筛选条件当作总数。"""
+    request = _READ_PREFIX.sub("", text)
+    if table_name and request.startswith(table_name):
+        request = re.sub(r"^(?:里面|里边|里|内|中)?的?\s*", "", request[len(table_name):])
+        scoped = True
+    else:
+        request, scoped = _SCOPE_PREFIX.subn("", request, count=1)
+    request = _READ_PREFIX.sub("", request).strip(" ，,")
+    title = _TITLE_QUERY.fullmatch(request)
+    if title and (scoped or re.search(r"收录|收藏|保存|存", title["ask"])):
+        return NamedLookup("paper_title", title["title"])
+    clean = request.rstrip("呢啊呀吗")
+    # 没有范围的“多少”“存了多少”也可能问其他事，须提到论文或量词“篇”。
+    papers = _PAPER_REQUEST.fullmatch(clean) or _PAPERS_FIRST.fullmatch(clean)
+    if papers and re.search(r"篇|论文|文献|文章", clean):
+        return "paper_count" if papers["count"] else "paper_list"
+    if re.fullmatch(r"(?:我的|已收藏的?)?(?:论文|文献)(?:清单|列表|目录)|我的收藏(?:夹)?", clean):
+        return "paper_list"
+    if TABLE_CHANGE.search(re.sub(r"「[^」]+」|“[^”]+”|\"[^\"]+\"", "", clean)):
+        return None
+    match = _COLUMN_KIND.fullmatch(clean)
+    if match:
+        name = match["name"].strip()
+        if name.startswith("字段"):
+            name = name[2:].strip()
+        quoted = re.fullmatch(r"[「『“\"](.+?)[」』”\"]", name)
+        # 无“列”或表格指代时，仅接管常见的论文表字段，避免截获一般知识问题。
+        if (scoped or match["marker"] or quoted or re.fullmatch(r"论文链接|原文链接|论文标题|中文摘要|方法概述|研究笔记|阅读笔记", name)):
+            if quoted:
+                name = quoted[1]
+            if name and not re.search(r"[？?，,；;]|如果|不要|能不能|别|然后|以及", name):
+                return NamedLookup("column", name)
+    return None
 
 
 def infer_table_lookup(message, table_name):
     """仅对明确提到当前数据表的剩余表达做只读分类；模型仅接收问句和表名。"""
+    if (TABLE_REF.search(message) and LOOKUP_ACTION.search(message) and _READ_THEN_WRITE.search(message)
+            and not PAPER_TABLE.search(message)):
+        return "clarify"
     if not (table_name and table_name in message or CURRENT_TABLE.search(message)):
         return None
     from agent_router import is_candidate
     if PAPER_TABLE.search(message) or TABLE_CHANGE.search(message) or is_candidate(message):
         return None
-    if FILTERED_LOOKUP.search(message):
+    qualified = QUALIFIED_PAPERS.search(message)
+    if FILTERED_LOOKUP.search(message) or (qualified and qualified[1].strip() and not re.fullmatch(
+            r"(?:已(?:经)?)?(?:收录|收藏|保存)(?:了)?的?", qualified[1].strip())):
         return "clarify"
     import model_support
     if not model_support.enabled():
@@ -57,30 +132,40 @@ def infer_table_lookup(message, table_name):
         return "clarify"
     if result["kind"] == "other":
         return None
+    # 用户只问数量时，即使模型误报 overview，也不能展开样例行或将行数当作论文篇数。
+    if ((PAPER_COUNT_UNIT.search(message) and result["kind"] != "paper_count")
+            or (RECORD_COUNT_UNIT.search(message) and result["kind"] != "count")):
+        return "clarify"
     return result["kind"] if result["kind"] in LOOKUP_CATEGORIES else "clarify"
 
 
 def table_lookup_kind(message, table_name):
     """识别仅查询当前表的短句；包含论文原表、具体搜索条件或其他动作时交回相应路由。"""
-    text = re.sub(r"\s+", "", message.strip(" \t，。！？?!"))
+    spoken = _NO_EDIT_PREFIX.sub("", message.strip(" \t，。！？?!"))
+    text = re.sub(r"\s+", "", spoken)
     # 原文中编号的表和当前连接的飞书表，使用不同数据源。
-    if PAPER_TABLE.search(text):
+    if PAPER_TABLE.search(re.sub(r"《[^《》]+》|原文链接(?=(?:是|用的|属于|这列|字段))", "", text)):
         return None
+    if _SKIP_QUERY.search(re.sub(r"[「“《][^」”》]+[」”》]", "", text)) and re.search(r"表|字段|论文|记录|数据|清单|列", text):
+        return "skip_query"
+    specific = _casual_lookup(spoken, table_name)
+    if specific:
+        return specific
     target = table_name if table_name and table_name in text else None
     if target:
         text = text.replace(target, "", 1)
     else:
         text, targets = TABLE_REF.subn("", text, count=1)
-        if not targets and not re.search(r"记录|条目|(?:多少|几)[条行列]|行数|字段|列名|栏位|栏目|表头", text):
+        if not targets and not re.search(r"记录|条目|(?:多少|几)[条行列]|行数|字段|列名|栏位|栏目|表头|(?:什么|啥|哪些|哪几[个种]?)[列栏]", text):
             return None
     if not (LOOKUP_ACTION.search(text) or LOOKUP_ASK.search(text) or LOOKUP_COUNT.search(text)):
         return None
     count = bool(LOOKUP_COUNT.search(text)) and "哪几" not in text
-    schema = bool(re.search(r"结构|字段|列名|表头|栏位|栏目|列数|(?:几|多少|哪些|什么)(?:个)?列", text))
+    schema = bool(re.search(r"结构|字段|列名|表头|栏位|栏目|列数|(?:几|多少|哪些|什么|啥)(?:个)?[列栏]", text))
     papers = bool(re.search(r"论文|文献|篇", text))
     remainder = LOOKUP_COUNT.sub("", LOOKUP_ASK.sub("", text))
     remainder = LOOKUP_FILLER.sub("", LOOKUP_ACTION.sub("", remainder)).strip("，、,")
-    remainder = re.sub(r"结构|字段|列名|表头|栏位|栏目|[列栏]|收录(?:了)?|保存(?:了)?|记录了|放了|东西|有|个|[，、,]", "", remainder)
+    remainder = re.sub(r"结构|字段|列名|表头|栏位|栏目|[列栏]|收录(?:了)?|保存(?:了)?|记录了|存了|放了|东西|有|个|[，、,]", "", remainder)
     if ROW_NOUN.sub("", remainder):
         return None
     if schema and not ROW_NOUN.search(text):

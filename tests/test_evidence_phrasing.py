@@ -63,6 +63,60 @@ class EvidencePhrasingTests(unittest.TestCase):
         self.prepare.assert_called_with(self.table, [BERT], kinds=["figure"])
         self.assertFalse(self.table.rows())
 
+    def test_pasted_sources_without_spaces_preserve_order_and_preview_only(self):
+        acl = "https://aclanthology.org/2020.acl-main.703/"
+        cvf = "https://openaccess.thecvf.com/content_cvpr_2016/html/He_Deep_Residual_Learning_CVPR_2016_paper.html"
+        review = "https://openreview.net/forum?id=VtmBAGCN7o"
+        doi = "10.1000/(abc);v1"
+        links = [RAG, BERT, acl, cvf, review]
+        cases = [
+            ("".join(links), links),
+            (cvf + acl + review, [cvf, acl, review]),
+            ("；".join(links) + "、" + BERT, links),
+            (";".join(links), links),
+            ("|".join(links), links),
+            ("：".join(links), links),
+            ("[实验表](" + RAG + ")[只收藏链接](" + acl + ")", [RAG, acl]),
+            (doi + RAG + "；" + review + ";" + doi, ["https://doi.org/" + doi, RAG, review]),
+            (acl + ";" + doi, [acl, "https://doi.org/" + doi]),
+            ("https://example.org/share?redirect=" + RAG + "|" + BERT,
+             ["https://example.org/share?redirect=" + RAG, BERT]),
+            (review + "#source=" + RAG, [review]),
+        ]
+        with patch("model_support.enabled", return_value=True), patch("evidence_intent.classify") as classify:
+            for pasted, expected in cases:
+                with self.subTest(pasted=pasted):
+                    chat = self.conversation()
+                    result = chat.respond(pasted)
+                    self.assertIn("预览数据和图表", result["choices"])
+                    chat.respond("只看关键数据", result["pending_id"])
+                    self.prepare.assert_called_with(self.table, expected, kinds=["metric"])
+            classify.assert_not_called()
+        self.assertEqual(self.table.rows(), [])
+
+    def test_glued_batch_limit_applies_before_preview(self):
+        links = [f"https://example.org/paper/{n}" for n in range(9)]
+        self.chat.respond("提取关键数据 " + "".join(links[:8]) + links[0])
+        self.prepare.assert_called_once_with(self.table, links[:8], kinds=["metric"])
+        with self.assertRaisesRegex(ValueError, "最多.*8"):
+            self.conversation().respond("提取关键数据 " + "".join(links))
+        self.assertEqual(self.table.rows(), [])
+
+    def test_pending_single_target_and_literal_note_with_glued_links(self):
+        prompt = self.chat.respond("保存论文链接")
+        response = self.chat.respond(RAG + BERT, prompt["pending_id"])
+        self.assertIn("指定一篇", response["message"])
+        self.assertEqual(self.table.rows(), [])
+        saved = self.chat.respond(RAG, response["pending_id"])
+        note = "比较原文：" + RAG + BERT
+        result = self.chat.respond("给刚才那篇记一句：" + note)
+        self.assertEqual(result["row"]["id"], saved["row"]["id"])
+        self.assertEqual(result["row"]["fields"]["阅读笔记"], note)
+        quoted = "另一个参考：" + BERT + RAG
+        changed = self.chat.respond("给刚才那篇把「" + quoted + "」写进阅读笔记")
+        self.assertEqual(changed["row"]["id"], saved["row"]["id"])
+        self.assertEqual(changed["row"]["fields"]["阅读笔记"], quoted)
+
     def test_bare_paper_can_switch_to_normal_link_save(self):
         question = self.chat.respond(RAG)
         result = self.chat.respond("只收藏链接", question["pending_id"])

@@ -16,17 +16,11 @@ start "" "http://127.0.0.1:%PAPER_LIVE_PORT%/"
 exit /b 0
 
 :launch
-if not exist "data\feishu-target.json" (
-    echo 尚未绑定飞书表。请先按 README 的说明配置目标表。
-    pause
-    exit /b 1
-)
-rem 本次启动固定使用已绑定的表。模型名称可由运行者预先指定。
+rem 有绑定时打开原表，无绑定时可在对话中创建多维表格文件。
 set "FEISHU_APP_TOKEN="
 set "FEISHU_TABLE_ID="
 set "FEISHU_TABLE_NAME="
 set "PAPER_AGENT_PROVIDER=codex"
-if not defined PAPER_MODEL_NAME set "PAPER_MODEL_NAME=gpt-6.2-sol"
 if not defined LARK_CLI (
     where lark-cli >nul 2>&1
     if errorlevel 1 if exist "%APPDATA%\npm\lark-cli.cmd" set "LARK_CLI=%APPDATA%\npm\lark-cli.cmd"

@@ -31,6 +31,8 @@ def _check_permission(value):
 
 class CollaboratorAdmin:
     def __init__(self, table):
+        if isinstance(table, LocalTable):
+            table = table._root
         self.table = table
         self.local = isinstance(table, LocalTable)
         if self.local:

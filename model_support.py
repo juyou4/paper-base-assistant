@@ -61,9 +61,9 @@ def selection_info(selected=None):
 
 
 @contextmanager
-def trace_calls():
+def trace_calls(*, include_failed=False):
     steps = []
-    token = _active_steps.set(steps)
+    token = _active_steps.set((steps, include_failed))
     try:
         yield steps
     finally:
@@ -131,15 +131,20 @@ def request_json(instructions, payload, *, step="理解操作意图"):
 
 def _chat(config, instructions, payload, step):
     url, model, key = config
-    with activity_step("调用模型 · " + step, tool="Codex CLI" if url is None else "Chat Completions"):
-        if url is None:
-            from codex_provider import request
-            answer = request(instructions, payload, model)
-        else:
-            answer = _compatible_chat(url, model, key, instructions, payload)
-    steps = _active_steps.get()
-    if steps is not None:
-        steps.append(step)
+    trace = _active_steps.get()
+    try:
+        with activity_step("调用模型 · " + step, tool="Codex CLI" if url is None else "Chat Completions"):
+            if url is None:
+                from codex_provider import request
+                answer = request(instructions, payload, model)
+            else:
+                answer = _compatible_chat(url, model, key, instructions, payload)
+    except Exception:
+        if trace is not None and trace[1]:
+            trace[0].append(step + "（失败）")
+        raise
+    if trace is not None:
+        trace[0].append(step)
     return answer
 
 
