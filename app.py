@@ -18,6 +18,7 @@ import model_support
 import paper_attachments
 import pdf_page_preview
 import papers
+from history_controller import HistoryController, owner_key
 from table_store import FeishuTable, LarkCliTable, LocalTable, TableError
 from workflow import Conversation, _fields
 from title_aliases import title_alias_terms
@@ -27,7 +28,7 @@ from workspace_actions import target_link
 ROOT = Path(__file__).resolve().parent
 WEB_TYPES = {
     "/index.html": "text/html", "/style.css": "text/css", "/app.js": "text/javascript",
-    "/rich-text.js": "text/javascript", "/vendor/katex/katex.min.js": "text/javascript",
+    "/rich-text.js": "text/javascript", "/history.js": "text/javascript", "/vendor/katex/katex.min.js": "text/javascript",
     "/vendor/katex/katex.min.css": "text/css", "/vendor/markdown-it/markdown-it.min.js": "text/javascript",
 }
 KATEX_FONT = re.compile(r"/vendor/katex/fonts/KaTeX_[A-Za-z0-9-]+\.woff2")
@@ -60,6 +61,7 @@ class Application:
         self.base_name = config.get("base_name", "") if self.feishu_url else ""
         self.sessions = {}
         self.lock = threading.Lock()
+        self.history = HistoryController(self.data_dir, mode)
 
     def session(self, cookie):
         now = time.monotonic()
@@ -69,10 +71,13 @@ class Application:
                     if now - seen > 7200:
                         old_chat.close()
                         del self.sessions[key]
-                if not (isinstance(cookie, str) and re.fullmatch(r"[\w-]{32}", cookie)
-                        and paper_attachments.AttachmentLibrary(self.data_dir, cookie).index.is_file()):
+                if not (isinstance(cookie, str) and re.fullmatch(r"[A-Za-z0-9_-]{32}", cookie)
+                        and (self.history.store.has_owner(owner_key(cookie))
+                             or paper_attachments.AttachmentLibrary(self.data_dir, cookie).index.is_file())):
                     cookie = secrets.token_urlsafe(24)
-                self.sessions[cookie] = [Conversation(self.table, self.data_dir, self.name, self.feishu_url, self.base_name), now]
+                chat = Conversation(self.table, self.data_dir, self.name, self.feishu_url, self.base_name)
+                self.history.attach(chat, cookie)
+                self.sessions[cookie] = [chat, now]
             self.sessions[cookie][1] = now
             return cookie, self.sessions[cookie][0]
 
@@ -143,7 +148,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def send_json(self, data, code=200, cookie=None):
-        headers = {"Set-Cookie": f"paper_session_{self.server.server_port}={cookie}; HttpOnly; SameSite=Strict; Path=/"} if cookie else {}
+        headers = {"Set-Cookie": f"paper_session_{self.server.server_port}={cookie}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000"} if cookie else {}
         self.send_body(json.dumps(data, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", code, headers)
 
     def browser_session(self):
@@ -176,10 +181,27 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET" and route.path == "/api/state":
                 cookie, chat = self.browser_session()
                 with chat.lock:
+                    history_identity = app.history.bind(chat)
                     snapshot = app.state(chat)
+                    snapshot.update(history_identity)
                     snapshot["table_view_id"] = chat.table_view_id
                 snapshot["attachments"] = paper_attachments.AttachmentLibrary(app.data_dir, cookie).list()
                 self.send_json(snapshot, cookie=cookie)
+            elif method == "GET" and route.path == "/api/workspace-history":
+                cookie, chat = self.browser_session()
+                with chat.lock:
+                    self.send_json(app.history.snapshot(chat), cookie=cookie)
+            elif method == "GET" and route.path == "/api/workspace-history/page":
+                params = parse_qs(route.query, keep_blank_values=True)
+                if set(params) != {"scope", "conversation_id", "kind", "before"} or any(len(v) != 1 for v in params.values()):
+                    raise ValueError("请从当前对话或操作记录继续加载。")
+                cookie, chat = self.browser_session()
+                with chat.lock:
+                    app.history.bind(chat)
+                    app.history.check(chat, params["scope"][0], params["conversation_id"][0])
+                    page = app.history.store.page(chat.history_owner, chat.history_scope, chat.history_conversation_id,
+                                                  params["kind"][0], params["before"][0])
+                self.send_json(page, cookie=cookie)
             elif route.path == "/api/attachments" or ATTACHMENT_ROUTE.fullmatch(route.path):
                 cookie, chat = self.browser_session()
                 self.attachment_request(method, route, cookie, chat)
@@ -205,7 +227,7 @@ class Handler(BaseHTTPRequestHandler):
                 cookie, chat = self.browser_session()
                 self.send_json(chat.activity.snapshot(request_id), cookie=cookie)
             elif method == "POST" and route.path in {"/api/chat", "/api/model", "/api/reading-progress",
-                                                     "/api/records/compare", "/api/records/export"}:
+                                                     "/api/records/compare", "/api/records/export", "/api/workspace-history"}:
                 if self.headers.get_content_type() != "application/json":
                     self.send_json({"error": "请求体需要为 JSON。"}, 415)
                     return
@@ -215,6 +237,10 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 body = json.loads(self.rfile.read(length))
                 cookie, chat = self.browser_session()
+                if route.path == "/api/workspace-history":
+                    with chat.lock:
+                        self.send_json(app.history.update(chat, body), cookie=cookie)
+                    return
                 if route.path.startswith("/api/records/"):
                     from saved_compare import comparison_data, read_selection
                     with chat.lock:
@@ -238,13 +264,24 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json(result, cookie=cookie)
                     return
                 if route.path == "/api/reading-progress":
-                    if (not isinstance(body, dict) or set(body) != {"record_id", "expected", "status"}
+                    required = {"record_id", "expected", "status"}
+                    if (not isinstance(body, dict) or set(body) not in (required, required | {"history_scope", "history_conversation_id"})
                             or not all(isinstance(v, str) for v in body.values())):
                         raise ValueError("请指定当前记录和阅读进度。")
                     with chat.lock:
                         if not isinstance(chat.table, LocalTable):
                             raise ValueError("该操作适用于本地阅读清单。")
+                        app.history.bind(chat)
+                        if "history_scope" in body:
+                            app.history.check(chat, body["history_scope"], body["history_conversation_id"])
                         chat.table.set_reading_progress(body["record_id"], body["expected"], body["status"])
+                        actual = chat.table.reading_progress().get(body["record_id"])
+                        app.history.store.record_operation(chat.history_owner, chat.history_scope, chat.history_conversation_id,
+                            uuid.uuid4().hex, {"action": "reading_progress",
+                            "status": "verified" if actual == body["status"] else "unverified",
+                            "summary": f"阅读进度由「{body['expected']}」调整为「{body['status']}」。",
+                            "details": [{"label": "记录 ID", "value": body["record_id"], "record_id": body["record_id"]},
+                                        {"label": "回读进度", "value": actual or "未取得"}]})
                     self.send_json({"status": body["status"]}, cookie=cookie)
                     return
                 if route.path == "/api/model":
@@ -271,7 +308,7 @@ class Handler(BaseHTTPRequestHandler):
                         if not isinstance(body["evidence_fields"], list):
                             raise ValueError("目标列设置无效，请重新选择。")
                         options["evidence_fields"] = body["evidence_fields"]
-                    result = chat.respond(message, body.get("pending_id"), request_id, **options)
+                    result = app.history.respond(chat, message, body, request_id, options)
                     if steps:
                         result["agent"] = agent
                 result["activity"] = run.snapshot()

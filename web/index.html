@@ -10,6 +10,7 @@
   <script defer src="/vendor/katex/katex.min.js"></script>
   <script defer src="/vendor/markdown-it/markdown-it.min.js"></script>
   <script defer src="/rich-text.js"></script>
+  <script defer src="/history.js"></script>
   <script defer src="/app.js"></script>
 </head>
 <body>
@@ -86,7 +87,13 @@
               <p class="engine-status" id="engine-mode" role="status" hidden></p>
             </div>
           </div>
-          <span class="pending-pill" id="pending-badge" hidden>待确认</span>
+          <div class="chat-head-actions">
+            <span class="pending-pill" id="pending-badge" hidden>待确认</span>
+            <button type="button" class="icon-pill" id="history-open" aria-haspopup="dialog" hidden>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5m4-1v5l3 2"/></svg>
+              历史与记忆
+            </button>
+          </div>
         </div>
 
         <div class="examples">
@@ -126,6 +133,7 @@
           </div>
         </div>
 
+        <button type="button" class="paper-detail-pill earlier-messages" id="history-earlier-messages" hidden>查看更早消息</button>
         <div class="chat" id="chat" role="log" aria-live="polite" aria-label="对话记录">
           <article class="intro-message message assistant" id="welcome">
             <div class="bubble">
@@ -155,6 +163,11 @@
         </template>
 
         <form id="composer" class="composer-outer-shell">
+          <div id="context-strip" class="context-strip" hidden>
+            <span id="context-table"></span>
+            <span id="context-focus" hidden></span>
+            <button type="button" id="context-forget" class="context-forget" aria-label="清除当前论文" title="清除当前论文" hidden>×</button>
+          </div>
           <div class="composer-card">
             <input id="pdf-files" type="file" accept=".pdf,application/pdf" multiple hidden>
             <details id="pdf-tray" class="pdf-tray" hidden>
@@ -353,6 +366,50 @@
       </div>
     </div>
   </main>
+
+  <dialog id="history-dialog" aria-labelledby="history-title">
+    <div class="detail-shell">
+      <header class="detail-head">
+        <div><h2 id="history-title">历史与记忆</h2><p id="history-table-name"></p></div>
+        <button type="button" class="icon-pill close-btn" id="history-close">关闭</button>
+      </header>
+      <nav class="history-tabs" aria-label="历史与记忆视图">
+        <button type="button" data-history-tab="chats" aria-pressed="true">对话历史</button>
+        <button type="button" data-history-tab="operations" aria-pressed="false">操作历史</button>
+        <button type="button" data-history-tab="memory" aria-pressed="false">记忆设置</button>
+      </nav>
+      <div class="history-body" id="history-body">
+        <section data-history-section="chats" aria-label="对话历史">
+          <div class="history-actions">
+            <button type="button" class="send-pill" id="history-new">新建对话</button>
+            <button type="button" class="paper-detail-pill" id="history-clear">清空本表对话</button>
+          </div>
+          <div id="history-chats" class="history-list"></div>
+        </section>
+        <section data-history-section="operations" aria-label="操作历史" hidden>
+          <div id="history-operations" class="history-list"></div>
+          <button type="button" class="paper-detail-pill" id="history-earlier-operations" hidden>加载更早操作</button>
+        </section>
+        <section data-history-section="memory" aria-label="记忆设置" hidden>
+          <div class="history-settings">
+            <label><span>保存本表的新对话消息</span><input type="checkbox" id="history-save" data-setting="save_history"></label>
+            <label><span>重开对话时续读上次的论文</span><input type="checkbox" id="history-resume" data-setting="resume_focus"></label>
+            <label><span>使用本表已保存的偏好</span><input type="checkbox" id="history-use" data-setting="use_preferences"></label>
+          </div>
+          <form id="preference-form" class="preference-form">
+            <label for="preference-input">提取结果的默认写入列</label>
+            <div><input id="preference-input" list="preference-options" maxlength="240" autocomplete="off" placeholder="代码链接优先写入「研究笔记」"><button type="submit" class="icon-pill" id="preference-save">记住</button></div>
+            <datalist id="preference-options"></datalist>
+          </form>
+          <div id="history-preferences" class="history-list"></div>
+        </section>
+      </div>
+      <div id="history-decision" class="history-decision" hidden>
+        <p id="history-decision-text"></p><button type="button" class="paper-detail-pill" id="history-back">取消</button><button type="button" class="paper-detail-pill" id="history-accept">确认删除</button>
+      </div>
+      <p id="history-error" role="alert" hidden></p>
+    </div>
+  </dialog>
 
   <dialog id="evidence-review" aria-labelledby="review-title" aria-describedby="review-summary">
     <div class="detail-shell">

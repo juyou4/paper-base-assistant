@@ -275,6 +275,7 @@ class Conversation:
         self.initial_target = (table, table_name, self.base_name, self.base_url)
         self.owned_bases = []
         self.workspace_receipt = None
+        self.history_preferences = {}
         self.last = None
         self.last_title = ""
         self.last_library_results = None
@@ -293,6 +294,7 @@ class Conversation:
         self.table_view_id = uuid.uuid4().hex
         self.base_name, self.base_url = base_name, base_url
         self.table_tool = getattr(table, "tool_name", None)
+        self.history_preferences = {}
         self.last = self.last_title = self.pending = None
         self.last_library_results = None
         saved_focus.clear(self)
@@ -444,7 +446,8 @@ class Conversation:
             if any(url not in kinds for url in urls):
                 return self._ask_evidence_scope(urls)
             kinds = {url: kinds[url] for url in urls}
-        plan, reply = prepare(self.table, urls, kinds=kinds)
+        overrides = {"preferences": self.history_preferences} if self.history_preferences else {}
+        plan, reply = prepare(self.table, urls, kinds=kinds, **overrides)
         batch_id = uuid.uuid4().hex
         reply["evidence_preview"] = {"id": batch_id, "papers": reply["evidence_preview"]}
         reply.pop("choices", None)
@@ -730,9 +733,11 @@ class Conversation:
                                  [], "paper")
             action = {"created": "已新增 1 条记录", "updated": "已更新原有记录", "unchanged": "已存在相同内容，未新增记录"}[write["action"]]
             wording = "、".join(values)
+            receipt = {"record_id": row["id"], "url": paper["url"], "collection": bool(plan.get("collect")),
+                       "fields": values, "change": write["action"]}
             answer.update(message=answer.get("message", "") + f"{action}。已核对「{self.table_name}」中的{wording}。",
                           preflight=checks, verification=f"写前核验通过 · 回读一致 · {len(values)} 个字段 · {row['id']}",
-                          row=row, evidence=evidence)
+                          row=row, evidence=evidence, write_receipt=receipt)
             if plan.get("collect"):
                 aliases = plan["aliases"]
                 source_library.remember(self.table, row, paper, aliases)
@@ -863,7 +868,7 @@ class Conversation:
         if len(urls) == 1:
             return self._load(urls[0], {**_parse("收藏", self.table_name), "request_id": request_id or uuid.uuid4().hex})
         batch = request_id or uuid.uuid4().hex
-        cards, references = {}, {}
+        cards, references, receipts = {}, {}, []
         saved = 0
         for index, url in enumerate(urls):
             try:
@@ -873,10 +878,12 @@ class Conversation:
                 card = item["collection"][0]
                 key = card["record_id"]
                 cards[key] = card
+                receipts.append({"status": "verified", "url": url, "title": card.get("title"), "record_id": key})
                 references.setdefault(key, url)
                 saved += 1
             except (TableError, ValueError, OSError) as error:
                 cards[url] = {"url": url, "title": url, "error": str(error)}
+                receipts.append({"status": "unverified", "url": url, "message": str(error)})
                 references[url] = url
         self.last = self.last_title = self.pending = self.recent_evidence = None
         saved_focus.clear(self)
@@ -885,7 +892,7 @@ class Conversation:
         self.collection_batch = list(self.recent_saved)
         count = sum(bool(card.get("record_id")) for card in cards.values())
         return {"message": f"已收藏 {saved}/{len(urls)} 个来源，对应 {count} 条论文记录。",
-                "collection": list(cards.values())}
+                "collection": list(cards.values()), "collection_receipts": receipts}
 
     def _collect_selection(self, text, urls, request_id):
         """明确的排序选择只处理相应链接，有筛选条件时保留原批次供用户选择。"""
@@ -1166,14 +1173,17 @@ class Conversation:
                                "role": "提交并核对角色权限"}
                     with step(actions[plan["kind"]], tool=self.table_tool):
                         message = commit(self.table, plan)
-                    return {"message": message, "verification": "写前已核验变更对象与原值，写后已回读"}
+                    category = {"field": "field_change", "member": "member_permission", "role": "role_permission"}
+                    return {"message": message, "verification": "写前已核验变更对象与原值，写后已回读",
+                            "management_action": category[plan["kind"]]}
                 if stage == "schema":
                     if pending_id != task["id"]:
                         raise ValueError("请使用当前对话的建列确认选项。")
                     with step("提交新建字段请求", tool=self.table_tool):
                         f = self.table.add_field(plan["name"], plan["kind"])
                     self.pending = None
-                    return {"message": f"已确认表结构，字段「{f['name']}」可以使用。", "verification": "已回读字段定义"}
+                    return {"message": f"已确认表结构，字段「{f['name']}」可以使用。", "verification": "已回读字段定义",
+                            "management_action": "field_change"}
                 if stage == "language":
                     plan["english"] = True
                 elif stage == "field":

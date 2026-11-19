@@ -778,7 +778,7 @@ function autoResizePrompt() {
 
 function controls() {
   const input = byId("prompt");
-  const locked = busy || switchingModel || refreshingState || !ready;
+  const locked = busy || switchingModel || refreshingState || workspaceHistory.changing || !ready;
   byId("pdf-add").disabled = locked || uploadingPdf;
   byId("pdf-bind").disabled = locked || uploadingPdf;
   byId("pdf-save").disabled = byId("pdf-extract").disabled =
@@ -802,6 +802,7 @@ function controls() {
   const emptyCta = byId("empty-try-btn");
   if (emptyCta) emptyCta.disabled = locked || Boolean(pendingId);
   for (const cs of customSelects) cs.sync(false);
+  workspaceHistory.syncControls();
 }
 
 async function switchModel() {
@@ -998,6 +999,9 @@ function renderSelection() {
 function readingTools(row) {
   const wrap = make("div", undefined, "reading-tools");
   const current = state.reading_progress[row.id] || "待读";
+  const historyIdentity = state.history_scope ? {
+    history_scope: state.history_scope, history_conversation_id: state.history_conversation_id
+  } : {};
   const select = make("select", undefined, "paper-detail-pill");
   select.setAttribute("aria-label", "阅读进度");
   for (const label of ["待读", "在读", "已读"]) select.append(new Option(label, label));
@@ -1006,7 +1010,7 @@ function readingTools(row) {
     select.disabled = true;
     try {
       await api("/api/reading-progress", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ record_id: row.id, expected: current, status: select.value }) });
+        body: JSON.stringify({ record_id: row.id, expected: current, status: select.value, ...historyIdentity }) });
       showToast("阅读进度已保存到本机");
     } catch (err) { showToast(err.message, "error"); }
     await refreshState();
@@ -1232,7 +1236,7 @@ function renderState() {
   requestAnimationFrame(() => selectView(viewMode, false));
 }
 
-async function refreshState(manual = false) {
+async function refreshState(manual = false, retryHistory = true) {
   const token = ++latestStateRequest;
   refreshingState = true;
   controls();
@@ -1252,6 +1256,11 @@ async function refreshState(manual = false) {
       rows: snapshot.rows || [],
       capabilities: snapshot.capabilities || {}
     };
+    if (!await workspaceHistory.sync(state, () => token === latestStateRequest, {manual})) {
+      if (retryHistory) return await refreshState(manual, false);
+      throw new Error("另一页已切换工作区，请刷新后继续。");
+    }
+    if (token !== latestStateRequest) return;
     ready = true;
     if (comparedRecords.size) {
       const current = new Map(state.rows.map(row => [row.id, row]));
@@ -1266,7 +1275,9 @@ async function refreshState(manual = false) {
     const plan = state.pending_dialog || state.workspace_pending;
     if (plan && plan.id !== pendingId) {
       pendingId = plan.id;
-      const { article } = appendMessage(plan.message, "assistant");
+      const previous = byId("chat").lastElementChild;
+      const article = previous?.matches("[data-archived].assistant") && previous.textContent === plan.message
+        ? previous : appendMessage(plan.message, "assistant").article;
       if (plan.evidence_preview) showReviewButton(article, plan.evidence_preview, true);
       else if (plan.choices.length) appendChoices(article, plan.choices, plan.id);
     } else if (!plan && "pending_dialog" in state) {
@@ -1293,16 +1304,45 @@ async function refreshState(manual = false) {
   }
 }
 
-function appendMessage(content, kind = "assistant") {
+function createMessage(content, kind) {
   const article = make("article", undefined, "message " + kind);
   const bubble = make("div", undefined, "bubble");
   bubble.append(make("p", content));
   article.append(bubble);
-
-  const chat = byId("chat");
-  chat.append(article);
-  chat.scrollTop = chat.scrollHeight;
   return { article, bubble };
+}
+
+function appendMessage(content, kind = "assistant") {
+  const message = createMessage(content, kind);
+  const chat = byId("chat");
+  chat.append(message.article);
+  chat.scrollTop = chat.scrollHeight;
+  return message;
+}
+
+function resetConversationSurface(changed) {
+  selectedId = pendingId = reviewId = retryableRequest = null;
+  reviewSelections.clear();
+  reviewFieldOverrides.clear();
+  if (changed) {
+    try { sessionStorage.removeItem("paper-review-choices"); } catch {}
+    byId("prompt").value = "";
+    autoResizePrompt();
+    comparedRecords.clear();
+    choosingComparison = false;
+  }
+  for (const id of ["evidence-review", "detail", "comparison-detail"]) {
+    if (byId(id).open) byId(id).close();
+  }
+  byId("review-papers").replaceChildren();
+  byId("pdf-tray").open = false;
+  byId("pdf-select").dataset.active = "";
+  byId("pdf-select").value = "";
+  byId("pdf-ref").value = byId("pdf-title").value = "";
+  byId("verification").className = "verify-status";
+  byId("verification").textContent = "写入后自动核对结果";
+  byId("verify-icon").className = "status-badge idle";
+  showEvidence([]);
 }
 
 function trackActivity(requestId) {
@@ -1976,7 +2016,7 @@ function appendChoices(article, labels, taskId) {
 
 async function submit(text) {
   const instruction = text.trim();
-  if (!instruction || busy || switchingModel || refreshingState || !ready) return;
+  if (!instruction || busy || switchingModel || refreshingState || workspaceHistory.changing || !ready) return;
   const task = pendingId;
   const confirm = /^确认[。！!]?$/.test(instruction)
     || /^确认(?:回填|写入|提交)(?:\s+[0-9a-f]{32})?[。！!]?$/.test(instruction);
@@ -2009,6 +2049,7 @@ async function submit(text) {
       body: JSON.stringify({
         message: instruction,
         request_id: request.id,
+        ...(state.history_scope ? {history_scope: state.history_scope, history_conversation_id: state.history_conversation_id} : {}),
         evidence_selection: request.selection,
         ...(request.fields ? { evidence_fields: request.fields } : {}),
         ...(task ? { pending_id: task } : {})
@@ -2093,6 +2134,11 @@ async function submit(text) {
     }
 
     if (!result.evidence_preview) await refreshState(false);
+    else if (state.history_scope) {
+      if (result.history_scope && result.history_scope !== state.history_scope) await refreshState();
+      else if (!await workspaceHistory.sync({...state, ...result})) await refreshState();
+    }
+    if (result.target_changed && ready && !result.verification) showToast("已切换到「" + state.table_name + "」");
     if ((result.row || result.verification) && !incomplete) playRevealWave();
   } catch (err) {
     finishActivity(err.activity, true);
@@ -2106,6 +2152,7 @@ async function submit(text) {
     if (err.agent?.steps?.length) appendModelTrace(article, err.agent);
     else article.append(make("p", "请求失败", "model-trace"));
     showToast(err.message, "error");
+    if (state.history_scope && !err.networkFailure) await refreshState();
   } finally {
     busy = false;
     controls();
@@ -2379,6 +2426,7 @@ createCustomSelect(byId("pdf-target"), { variant: "field", placement: "top", mat
 createCustomSelect(byId("review-paper-select"), { variant: "pill", placement: "bottom", matchTriggerWidth: true, fullWidth: true });
 createCustomSelect(byId("review-kind"), { variant: "pill", placement: "bottom", matchTriggerWidth: true, fullWidth: true });
 
+const workspaceHistory = createWorkspaceHistory();
 controls();
 selectView("cards", false);
 refreshState(false);

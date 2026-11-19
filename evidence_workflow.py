@@ -135,7 +135,15 @@ def _field_values(items, before, identifiers):
     return values, modes
 
 
-def _prepare_one(table, url, entry, schema, rows):
+def writable_evidence_columns(schema):
+    from workflow import _fields
+    id_names = {f["name"] for kind in ("title", "url") for f in _fields(schema, kind)}
+    id_aliases = {name.casefold() for kind in ("title", "url") for name in _FIELD_NAMES[kind]}
+    return [c["name"] for c in schema if c["type"] == "text" and c["name"] not in id_names
+            and c["name"].casefold() not in id_aliases]
+
+
+def _prepare_one(table, url, entry, schema, rows, preferences=None):
     columns = {"url": _field(schema, "url")}
     try:
         columns["title"] = _field(schema, "title")
@@ -143,12 +151,13 @@ def _prepare_one(table, url, entry, schema, rows):
         pass  # 链接标识足以确定论文，标题列可选。
     identity_aliases = {name.casefold() for kind in ("title", "url") for name in _FIELD_NAMES[kind]}
     id_names = {col["name"] for col in schema if col["name"].casefold() in identity_aliases}
-    writable_columns = [col["name"] for col in schema if col["type"] == "text" and col["name"] not in id_names]
+    writable_columns = writable_evidence_columns(schema)
     for item in entry["items"]:
-        column = _field(schema, item["kind"], item["label"])
-        if column in columns.values():
-            raise ValueError(f"「{column['name']}」用于论文标识，无法同时存放提取结果。")
-        item["field"] = column["name"]
+        preferred = (preferences or {}).get(item["kind"])
+        column = preferred if preferred in writable_columns else _field(schema, item["kind"], item["label"])["name"]
+        if column not in writable_columns:
+            raise ValueError(f"「{column}」用于论文标识，无法同时存放提取结果。")
+        item["field"] = column
     title_col = columns.get("title", {}).get("name")
     link = columns["url"]["name"]
     row = _locate(table, schema, link, title_col, url, entry["title"], rows)
@@ -224,7 +233,7 @@ def _extract_one(number, entry, requested, key, wanted, extract_fn):
         return paper
 
 
-def prepare(table, urls, kinds=None):
+def prepare(table, urls, kinds=None, *, preferences=None):
     """返回仅驻留服务端的确认计划和浏览器可见的逐篇预览。"""
     from evidence_extract import extract_evidence
 
@@ -292,7 +301,7 @@ def prepare(table, urls, kinds=None):
                     raise ValueError("本批次中已出现同一篇论文。")
                 anchor = existing_source(table, aliases, rows=rows)
                 target = anchor if anchor and _identity(anchor) != _identity(entry["url"]) else entry["url"]
-                draft = _prepare_one(table, target, entry, schema, rows)
+                draft = _prepare_one(table, target, entry, schema, rows, preferences)
                 draft["aliases"] = aliases
                 draft["bibliography"] = {k: paper[k] for k in ("title", "authors", "year", "doi", "venue", "publication_type")
                                          if paper.get(k)}
@@ -385,7 +394,7 @@ def _selected_drafts(plan, selection, field_overrides=None):
         identifiers = ((draft["link"], draft["target_url"]), (draft["title_col"], entry["title"]))
         values, modes = _field_values(chosen_items, all_before, identifiers)
         _check_fields(all_schema, values)
-        selected.append({**draft, "values": values,
+        selected.append({**draft, "values": values, "chosen_items": chosen_items,
                          "before": {name: all_before.get(name, "") for name in values},
                          "schema": [f for f in all_schema if f["name"] in values],
                          "patch": {name: value for name, value in values.items() if modes[name] != "unchanged"}})
@@ -430,12 +439,14 @@ def commit(table, plan, selection=None, field_overrides=None):
                 continue
             try:
                 record_id = draft["record_id"]
+                write_action = "unchanged"
                 if draft["patch"]:
                     with step(f"提交第 {number} 篇论文的已确认字段", tool=tool):
                         write = table.upsert(draft["key"], draft["patch"], draft["request_id"],
                                              update_only=record_id is not None, expected_record_id=record_id,
                                              expected_fields=draft["before"])
                         record_id = write["record_id"]
+                        write_action = write["action"]
                 result["record_id"] = record_id
                 with step(f"回读第 {number} 篇论文的字段值", tool=tool):
                     saved = table.get(record_id)
@@ -443,8 +454,12 @@ def commit(table, plan, selection=None, field_overrides=None):
                             any(saved["fields"].get(n) != v for n, v in draft["values"].items())):
                         raise ValueError("回读记录或字段值与确认内容不符。")
                     remember(table, saved, {**draft.get("bibliography", {}), "url": draft["target_url"]}, draft["aliases"])
-                items = len(entry["items"]) if selection is None else len(selection[number - 1])
-                result.update(status="verified", selected_items=items,
+                chosen = draft.get("chosen_items", entry["items"])
+                items = len(chosen)
+                verified_items = [{"field": item["field"], "label": item["label"], "value": item["value"],
+                                   "source": item["source"], "url": item.get("public_source_url") or item["source_url"]}
+                                  for item in chosen]
+                result.update(status="verified", write_action=write_action, selected_items=items, verified_items=verified_items,
                               message=f"已核对 {items} 项证据和 {len(draft['values'])} 个字段，回读一致。")
             except TargetChanged as error:
                 result.update(status="failed", message=str(error))
