@@ -400,11 +400,17 @@ def commit(table, plan, selection=None, field_overrides=None):
     with table._lock:
         if "result" in plan:
             return plan["result"]
-        if selection is None and any(i["kind"] in RESOURCE_KINDS for entry in plan["entries"] for i in entry["items"]):
-            selection = [[idx for idx, item in enumerate(entry["items"]) if item["kind"] not in RESOURCE_KINDS]
-                         if draft else [] for entry, draft in zip(plan["entries"], plan["drafts"])]
-            if not any(selection):
-                raise ValueError("请在预览中核对原文，逐项勾选要保存的资源候选。")
+        skipped_manual = 0
+        if selection is None:
+            defaults = [[idx for idx, item in enumerate(entry["items"])
+                         if item["kind"] not in RESOURCE_KINDS and not item.get("review_required")]
+                        if draft else [] for entry, draft in zip(plan["entries"], plan["drafts"])]
+            skipped_manual = sum(len(entry["items"]) - len(default) for entry, default, draft
+                                 in zip(plan["entries"], defaults, plan["drafts"]) if draft)
+            if skipped_manual:
+                if not any(defaults):
+                    raise ValueError("请在预览中核对原文，逐项勾选要保存的资源候选或需核对原页的表格。")
+                selection = defaults
         drafts = _selected_drafts(plan, selection, field_overrides=field_overrides)
         results = []
         for number, (entry, draft) in enumerate(zip(plan["entries"], drafts), 1):
@@ -447,5 +453,8 @@ def commit(table, plan, selection=None, field_overrides=None):
         verified = sum(item["status"] == "verified" for item in results)
         total = len(results) if selection is None else sum(draft is not None for draft in drafts)
         count = f"{verified}/{total} 篇回读一致"
-        plan["result"] = {"message": f"本次回填结束，{count}。", "verification": count, "evidence_results": results}
+        message = f"本次回填结束，{count}。"
+        if skipped_manual:
+            message += f"另有 {skipped_manual} 项需要手动核对，已跳过。"
+        plan["result"] = {"message": message, "verification": count, "evidence_results": results}
         return plan["result"]

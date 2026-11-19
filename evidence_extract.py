@@ -353,7 +353,13 @@ def _pdf_grid(cells, label, caption, source, url, title):
     clear = (all(headers[1:]) and all(cell is not None for row in cells for cell in row)
              and all(row[0] and not NUMBER.fullmatch(row[0]) for row in data)
              and any(NUMBER.fullmatch(value) for value in data[0][1:]))
-    return [item, *(_scalar_items(item, data, title)[:4] if clear else [])]
+    if not label or re.fullmatch(r"第 \d+ 页表格 \d+", label):
+        item["review_required"] = "未找到与这块网格对应的表题。图中的坐标轴也可能被识别成表格，请对照原页。"
+    elif not clear:
+        item["review_required"] = "表头、行标或单元格边界不清晰，请对照原页核实数值所属的行列。"
+    if item.get("review_required"):
+        return [item]
+    return [item, *_scalar_items(item, data, title)[:4]]
 
 
 def _nearby_caption(page, box):

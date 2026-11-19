@@ -2988,9 +2988,19 @@ dialog::backdrop {
   border-color: var(--border-strong);
 }
 
-.review-item:has(.review-check:not(:checked)) {
+.review-item:has(.review-check:not(:checked)):not(:has(.review-uncertain)) {
   background: var(--card);
   opacity: 0.62;
+}
+
+.review-uncertain {
+  margin: 8px 0;
+  padding: 7px 10px;
+  border-radius: 9px;
+  background: var(--pill);
+  color: var(--ink-secondary);
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .review-source,

@@ -1498,6 +1498,12 @@ function reviewItem(item, paperUrl, checkbox, activeField, pageEndpoint) {
   const fieldName = activeField || item.field;
   if (fieldName) meta.append(make("span", "写入「" + fieldName + "」", "review-item-field"));
   block.append(meta, PaperRichText.render(make("h4"), item.label, true));
+  if (item.review_required) {
+    const notice = make("p", undefined, "review-uncertain");
+    notice.append(make("strong", "需核对原页"), "　" + item.review_required);
+    checkbox?.setAttribute("aria-description", notice.textContent);
+    block.append(notice);
+  }
   const latex = item.kind === "formula" && (item.latex || item.value);
   if (latex) {
     const copy = make("button", undefined, "mini-copy-btn formula-copy");
@@ -1609,8 +1615,9 @@ function openEvidenceReview(preview, restored = false) {
     if (restored) {
       try { saved = JSON.parse(sessionStorage.getItem("paper-review-choices")); } catch {}
     }
-    const choices = preview.papers.map(paper =>
-      paper.status === "ready" ? paper.items.map(item => !restored && !resourceKinds.has(item.kind)) : []);
+    const choices = preview.papers.map(paper => paper.status === "ready"
+      ? paper.items.map(item => !restored && !resourceKinds.has(item.kind) && !item.review_required)
+      : []);
     const matches = saved?.id === reviewId && Array.isArray(saved.choices) &&
       saved.choices.length === choices.length && choices.every((items, i) =>
         Array.isArray(saved.choices[i]) && saved.choices[i].length === items.length &&
@@ -1666,7 +1673,7 @@ function openEvidenceReview(preview, restored = false) {
     const tabTop = make("span", undefined, "review-tab-top");
     tabTop.append(make("span", String(index + 1), "review-tab-idx"), make("span", title, "review-tab-title"));
     const tabFoot = make("span", undefined, "review-tab-foot");
-    const tabCount = make("span", paper.status === "ready" ? items.length + "/" + items.length + " 项" : "跳过", "review-tab-count");
+    const tabCount = make("span", paper.status === "ready" ? items.length + " 项" : "跳过", "review-tab-count");
     const tabAction = make("span", paper.status === "ready" ? (shortActions[paper.action] || "") : "需核对", "review-tab-action");
     tabFoot.append(tabCount, tabAction);
     tabBtn.append(tabTop, tabFoot);
